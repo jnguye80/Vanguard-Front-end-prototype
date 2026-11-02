@@ -1,0 +1,101 @@
+case_type_id,case_type_name,escalation_team,sla_hours,created_at,load_date
+CT-100,Grant Status Inquiry,Compliance,48,2020-02-18 16:26:49,2026-09-30
+CT-101,Donation Issue,Compliance,72,2022-10-09 09:08:20,2026-09-30
+CT-102,Tax Receipt Request,Donor Services,48,2021-11-05 15:43:33,2026-09-30
+CT-103,Fund Balance Inquiry,Grants Management,8,2024-01-08 16:40:37,2026-09-30
+CT-104,Grant Recommendation,Accounting,8,2022-10-04 14:32:58,2026-09-30
+CT-105,Account Update,Donor Services,4,2023-01-23 16:09:19,2026-09-30
+CT-106,Due Diligence Question,Accounting,8,2020-06-06 13:59:45,2026-09-30
+CT-107,Wire/Distribution Issue,Accounting,24,2021-07-19 16:57:18,2026-09-30
+CT-108,Grant Status Inquiry (2),Donor Services,24,2024-12-31 11:40:35,2026-09-30
+CT-109,Donation Issue (2),Grants Management,8,2023-08-06 12:39:34,2026-09-30
+CT-110,Tax Receipt Request (2),Donor Services,72,2022-08-18 10:37:37,2026-09-30
+CT-111,Fund Balance Inquiry (2),Accounting,8,2023-11-06 17:46:57,2026-09-30
+CT-112,Grant Recommendation (2),Tier 2 Support,24,2024-02-13 17:02:52,2026-09-30
+CT-113,Account Update (2),Donor Services,4,2020-05-14 08:41:49,2026-09-30
+CT-114,Due Diligence Question (2),Tier 2 Support,24,2024-11-11 11:49:36,2026-09-30
+CT-115,Wire/Distribution Issue (2),Compliance,72,2023-03-19 08:31:56,2026-09-30
+CT-116,Grant Status Inquiry (3),Tier 2 Support,24,2022-04-02 12:30:15,2026-09-30
+CT-117,Donation Issue (3),Compliance,24,2023-05-27 15:04:44,2026-09-30
+CT-118,Tax Receipt Request (3),Donor Services,8,2021-09-21 15:26:30,2026-09-30
+CT-119,Fund Balance Inquiry (3),Compliance,8,2024-05-23 13:38:09,2026-09-30
+CT-120,Grant Recommendation (3),Grants Management,24,2023-11-26 13:25:08,2026-09-30
+CT-121,Account Update (3),Grants Management,72,2023-03-14 16:06:20,2026-09-30
+CT-122,Due Diligence Question (3),Accounting,48,2020-11-28 09:17:28,2026-09-30
+CT-123,Wire/Distribution Issue (3),Accounting,8,2024-10-31 09:03:18,2026-09-30
+CT-124,Grant Status Inquiry (4),Compliance,72,2022-03-01 14:15:55,2026-09-30
+CT-125,Donation Issue (4),Accounting,24,2024-07-21 17:46:20,2026-09-30
+CT-126,Tax Receipt Request (4),Accounting,8,2020-04-11 15:32:29,2026-09-30
+CT-127,Fund Balance Inquiry (4),Compliance,24,2020-08-14 15:01:05,2026-09-30
+CT-128,Grant Recommendation (4),Compliance,72,2020-10-06 15:15:13,2026-09-30
+CT-129,Account Update (4),Tier 2 Support,24,2020-10-27 08:03:18,2026-09-30
+CT-130,Due Diligence Question (4),Compliance,72,2021-08-12 15:18:34,2026-09-30
+CT-131,Wire/Distribution Issue (4),Donor Services,4,2023-07-19 14:08:56,2026-09-30
+CT-132,Grant Status Inquiry (5),Grants Management,24,2021-09-24 14:23:02,2026-09-30
+CT-133,Donation Issue (5),Compliance,4,2024-09-15 17:35:12,2026-09-30
+CT-134,Tax Receipt Request (5),Grants Management,72,2024-06-23 12:04:24,2026-09-30
+CT-135,Fund Balance Inquiry (5),Tier 2 Support,48,2024-03-25 16:17:52,2026-09-30
+CT-136,Grant Recommendation (5),Tier 2 Support,72,2021-04-02 09:08:06,2026-09-30
+CT-137,Account Update (5),Compliance,24,2023-03-06 13:35:23,2026-09-30
+CT-138,Due Diligence Question (5),Accounting,8,2022-10-03 17:32:25,2026-09-30
+CT-139,Wire/Distribution Issue (5),Tier 2 Support,4,2020-08-16 08:02:08,2026-09-30
+CT-140,Grant Status Inquiry (6),Grants Management,48,2021-07-07 16:29:09,2026-09-30
+CT-141,Donation Issue (6),Tier 2 Support,72,2022-09-01 10:20:59,2026-09-30
+CT-142,Tax Receipt Request (6),Tier 2 Support,24,2022-07-07 10:25:39,2026-09-30
+CT-143,Fund Balance Inquiry (6),Grants Management,72,2020-11-04 13:32:53,2026-09-30
+CT-144,Grant Recommendation (6),Tier 2 Support,72,2024-09-16 15:45:36,2026-09-30
+CT-145,Account Update (6),Grants Management,48,2020-10-08 08:23:21,2026-09-30
+CT-146,Due Diligence Question (6),Donor Services,48,2023-04-18 17:19:50,2026-09-30
+CT-147,Wire/Distribution Issue (6),Donor Services,72,2023-08-09 15:16:41,2026-09-30
+CT-148,Grant Status Inquiry (7),Tier 2 Support,72,2023-01-10 11:46:03,2026-09-30
+CT-149,Donation Issue (7),Tier 2 Support,48,2024-03-19 10:33:40,2026-09-30
+CT-150,Tax Receipt Request (7),Tier 2 Support,48,2022-10-26 10:52:43,2026-09-30
+CT-151,Fund Balance Inquiry (7),Accounting,4,2024-02-16 17:44:07,2026-09-30
+CT-152,Grant Recommendation (7),Accounting,4,2020-02-21 15:20:26,2026-09-30
+CT-153,Account Update (7),Accounting,48,2020-03-24 11:26:32,2026-09-30
+CT-154,Due Diligence Question (7),Tier 2 Support,48,2023-03-17 08:45:08,2026-09-30
+CT-155,Wire/Distribution Issue (7),Tier 2 Support,8,2022-11-19 16:20:42,2026-09-30
+CT-156,Grant Status Inquiry (8),Compliance,72,2023-04-04 14:20:11,2026-09-30
+CT-157,Donation Issue (8),Compliance,72,2023-11-02 13:34:22,2026-09-30
+CT-158,Tax Receipt Request (8),Grants Management,72,2022-01-31 15:12:15,2026-09-30
+CT-159,Fund Balance Inquiry (8),Grants Management,72,2023-03-13 12:14:19,2026-09-30
+CT-160,Grant Recommendation (8),Grants Management,8,2022-06-28 15:20:30,2026-09-30
+CT-161,Account Update (8),Grants Management,72,2023-02-19 12:18:07,2026-09-30
+CT-162,Due Diligence Question (8),Tier 2 Support,72,2021-06-13 14:57:25,2026-09-30
+CT-163,Wire/Distribution Issue (8),Grants Management,8,2024-10-13 12:02:18,2026-09-30
+CT-164,Grant Status Inquiry (9),Donor Services,24,2022-06-01 15:41:16,2026-09-30
+CT-165,Donation Issue (9),Compliance,8,2024-01-10 11:52:34,2026-09-30
+CT-166,Tax Receipt Request (9),Grants Management,72,2023-06-05 12:08:06,2026-09-30
+CT-167,Fund Balance Inquiry (9),Tier 2 Support,72,2021-06-27 11:15:03,2026-09-30
+CT-168,Grant Recommendation (9),Tier 2 Support,8,2020-05-13 11:03:06,2026-09-30
+CT-169,Account Update (9),Compliance,24,2020-04-19 15:06:43,2026-09-30
+CT-170,Due Diligence Question (9),Accounting,4,2022-03-14 16:59:10,2026-09-30
+CT-171,Wire/Distribution Issue (9),Compliance,48,2022-06-03 15:41:12,2026-09-30
+CT-172,Grant Status Inquiry (10),Grants Management,24,2021-01-07 12:41:03,2026-09-30
+CT-173,Donation Issue (10),Donor Services,72,2023-01-13 11:34:47,2026-09-30
+CT-174,Tax Receipt Request (10),Donor Services,8,2021-07-25 14:56:53,2026-09-30
+CT-175,Fund Balance Inquiry (10),Accounting,4,2023-08-05 14:50:31,2026-09-30
+CT-176,Grant Recommendation (10),Accounting,24,2023-09-03 08:00:19,2026-09-30
+CT-177,Account Update (10),Tier 2 Support,72,2024-04-21 09:59:21,2026-09-30
+CT-178,Due Diligence Question (10),Grants Management,48,2024-11-17 16:33:31,2026-09-30
+CT-179,Wire/Distribution Issue (10),Accounting,72,2020-08-26 15:17:12,2026-09-30
+CT-180,Grant Status Inquiry (11),Donor Services,24,2021-11-07 10:46:29,2026-09-30
+CT-181,Donation Issue (11),Grants Management,8,2022-10-23 08:47:21,2026-09-30
+CT-182,Tax Receipt Request (11),Grants Management,72,2021-08-06 11:11:39,2026-09-30
+CT-183,Fund Balance Inquiry (11),Compliance,48,2022-05-02 16:20:05,2026-09-30
+CT-184,Grant Recommendation (11),Compliance,4,2021-05-03 10:08:30,2026-09-30
+CT-185,Account Update (11),Grants Management,8,2021-03-28 08:16:24,2026-09-30
+CT-186,Due Diligence Question (11),Accounting,48,2020-06-25 12:21:19,2026-09-30
+CT-187,Wire/Distribution Issue (11),Tier 2 Support,72,2021-06-14 08:16:41,2026-09-30
+CT-188,Grant Status Inquiry (12),Grants Management,8,2021-12-02 08:42:07,2026-09-30
+CT-189,Donation Issue (12),Compliance,24,2023-01-29 10:25:43,2026-09-30
+CT-190,Tax Receipt Request (12),Tier 2 Support,24,2021-03-29 09:40:58,2026-09-30
+CT-191,Fund Balance Inquiry (12),Grants Management,24,2024-04-29 17:14:14,2026-09-30
+CT-192,Grant Recommendation (12),Accounting,48,2020-10-18 10:29:47,2026-09-30
+CT-193,Account Update (12),Tier 2 Support,24,2021-08-21 14:44:35,2026-09-30
+CT-194,Due Diligence Question (12),Compliance,72,2022-11-21 11:48:15,2026-09-30
+CT-195,Wire/Distribution Issue (12),Tier 2 Support,4,2021-07-25 16:28:33,2026-09-30
+CT-196,Grant Status Inquiry (13),Grants Management,4,2023-10-26 17:07:03,2026-09-30
+CT-197,Donation Issue (13),Tier 2 Support,72,2022-06-29 11:36:34,2026-09-30
+CT-198,Tax Receipt Request (13),Accounting,8,2022-07-29 13:54:33,2026-09-30
+CT-199,Fund Balance Inquiry (13),Compliance,4,2022-06-30 11:45:37,2026-09-30

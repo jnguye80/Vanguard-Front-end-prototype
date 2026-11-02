@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# Keep the client's synthetic extract byte-for-byte (it uses CRLF line endings).
+*.csv -text linguist-documentation

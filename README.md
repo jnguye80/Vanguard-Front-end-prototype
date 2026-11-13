@@ -1,15 +1,137 @@
-# Momentum · Grants assistant prototype
+# Momentum · Grants assistant prototype (chat and voice)
 
-Clickable UX prototype for **Vanguard Charitable × ASU AI Cloud Innovation Center** (project "Momentum",
-Agentic Donor Engagement Platform). Scope: **grants domain, chat channel**.
+Simplified UX prototype for **Vanguard Charitable × ASU AI Cloud Innovation Center** (project "Momentum").
+It shows **how a donor's question is handled, the same way on chat and on a phone call**, with
+authentication and authorization as separate, visible steps, and **what the rep sees** when the assistant
+hands off.
 
-It runs entirely in the browser on the **synthetic gold-layer extract** Vanguard Charitable shared
-(`src/data/csv/`). The agent is a deterministic mock of the Bedrock orchestrator + Grants specialist, wired
-to mock versions of the six MCP tools from the *AWS AI Grant POC — Use Case Schema & Data Model* doc.
+> **No real data, no data processing.** Everything runs in the browser on a small set of **fictional sample
+> records** written by hand (`src/data/sample.ts`). No client data, no data connections, nothing stored or
+> sent. (CIC scope: *ASU AI CIC will not process real donor data or handle production deployment.*)
 
-> **Synthetic data only.** No real donor data is in this repository. The CSVs in `src/data/csv/` are the
-> synthetic extract Vanguard Charitable approved for the POC. Confirm with Vanguard Charitable before making
-> this repository or a GitHub Pages site public.
+## What's on the screen
+
+Two views (top right): **Donor assistant** and **Rep console**. The donor assistant has three parts:
+
+| Part | What it shows |
+|---|---|
+| **Donor and journey** (top) | Who is on the line, highlighted once verified (name, fund, donor ID, how they verified), and where they are in the journey: **reach out → verify identity → ask about a grant → get help**. The last step names the outcome: answered, general reply, or handed to a person. A failed sign-in stops the journey at verification. |
+| **Chat / Voice call** (switch at the top) | The same grants assistant on two Amazon Connect channels. **Chat:** type, or tap a suggestion. **Voice:** start a simulated call, verify on the keypad, then speak (microphone where the browser allows it), tap a phrase, or type what you'd say. Replies are read aloud when the browser supports it; captions are always on. |
+| **How this question was handled** | The five steps for the last message, identical for both channels, plus the **Q&A contract** for that message as JSON. |
+
+### Not-verified donor
+
+Not every donor can verify. The assistant handles three cases the same way on chat and voice:
+
+| Situation | How it starts | What the donor can do |
+|---|---|---|
+| **Chooses not to verify** | "I don't have my donor ID" (chat chip), "I don't know my donor ID" (voice), or "I forgot my PIN" mid-call | Continue as a **guest**: general grant questions (what due diligence is, how long reviews take, how grants are paid) answered from approved policy |
+| **Fails 3 times** | Wrong donor ID or PIN three times | Same as guest, but can't try verifying again in this conversation |
+| **Hasn't verified yet** | Asks a question before entering an ID | Asked for the ID first; the question is kept and answered right after |
+
+In all three:
+- A question about **their own grants** ("my grant", a grant ID, "show my grants") is **blocked at authorization**. The assistant says why, and the question is kept, so verifying later (guest only) answers it straight away.
+- **A person is always available.** The hand-off is marked **Not verified** in the Rep console, with the next step "Verify the caller's/visitor's identity before discussing any grant", and the summary says whether they chose not to verify or failed.
+- The donor card turns amber ("Continuing as a guest" or "Locked after 3 tries"). The journey shows **Not verified** with "Skipped" or "Locked", then **Asks a general question**.
+- The flow panel shows Authentication **Not verified (guest)** and Authorization **General info only** or **Blocked**. The contract's `session.level` is `guest`, `locked`, `none` or `verified`, and `authorization.decision` can be `limited`.
+
+### Rep console
+
+Where every hand-off lands, from either channel:
+
+- **Chat** hand-offs arrive as a **case**; **voice** hand-offs arrive as a **transferred call** ("Pick up transferred call").
+- Each case shows who it is (verified or not), the channel, the team and a pausable SLA timer.
+- **Summary** tab: an AI summary, why it was handed off, the donor's words, a suggested next step, and the grant the donor saw or heard about.
+- **Transcript** tab: the whole conversation, already cleaned of personal data. On a call the PIN shows as `••••`.
+- **Reply** opens a reply drafted by the assistant for the rep to edit. **Mark resolved** closes the case.
+- Two earlier sample cases are there from the start, and cases stay when the donor starts over.
+
+Open it from **See what the rep sees →** on a chat hand-off, **See what the specialist sees →** after a voice transfer, or the **Rep console** tab.
+
+### The donor journey (MVP: one persona)
+
+The donor is someone asking about grants they requested. Same journey on both channels; only the details change:
+
+| Step | Chat | Voice |
+|---|---|---|
+| 1. Reach out | Opens the chat | Calls the grants line |
+| 2. Verify identity | Types their donor ID | Donor ID, then PIN, on the keypad |
+| 3. Ask about a grant | Types or taps a question | Says it (or taps / types what they'd say) |
+| 4. Get help | Card with the answer, a general reply, or a case for a person | The answer read aloud, a general reply, or a transfer to a person |
+
+### The five steps
+
+1. **Channel**: how the question arrived (typed, spoken, or keypad).
+2. **Personal data guardrail**: SSN, card, bank, email and phone numbers are removed before anything else
+   sees the message. Only the cleaned text is kept, and replies are checked on the way out.
+3. **Authentication: who is asking?**
+   - Chat: donor ID typed in the chat (stand-in for website sign-in).
+   - Voice: donor ID, then a 4-digit PIN, on the keypad (stand-in for phone verification). The PIN is never
+     shown or kept.
+   - Three failed attempts lock it, and the assistant offers a person. A question asked before verifying is
+     answered right after.
+4. **Authorization: what may they see?** Verified: only grants on their own account. Another donor's grant ID
+   is blocked and never looked up; a suspended account gets no grant details. Not verified: general grant
+   information only (see below). Anything wider
+   (advisors, family members, per-question permissions) is future work.
+5. **Answer**: the Grants agent answers from grant records and approved policy, gives a **generic reply**
+   (outside grants, or the planned Submissions toolset), or **hands off**: a case in chat, a transfer on a call.
+
+### Same answer, shaped for the channel
+
+| | Chat | Voice |
+|---|---|---|
+| Verify | Donor ID | Donor ID + PIN on keypad |
+| Choose a grant | Tap a card | "Press 1 for…", or say the charity's name |
+| Grant status | Card with tracker, facts and policy citation | The same grounded sentence, read aloud |
+| Hand-off | Case created; reply within the team's hours | Transferred to a specialist, with the case |
+
+### The Q&A contract (draft)
+
+`src/agent/contract.ts` builds the request a channel would send for each question and the response it gets
+back. It's a starting point for the integration contract, not an agreed API:
+
+```json
+{
+  "request": {
+    "channel": "voice",
+    "session": { "authenticated": true, "level": "verified", "method": "donor_id+pin", "donor_id": "D-01" },
+    "question": "Why is my grant pending?",
+    "pii_removed": []
+  },
+  "response": {
+    "outcome": "answered",
+    "answer": "Your $100,000 grant to Riverbend Community Health Clinic is in charity review now. …",
+    "authorization": { "decision": "allowed", "reason": "G-1001 belongs to D-01" },
+    "routing": { "agent": "Grants agent", "toolset": "Due diligence", "intent": "why_pending" },
+    "tools_called": ["get_donor_profile", "get_grant_status", "check_due_diligence", "search_knowledge_base"],
+    "sources": ["Grant record G-1001", "Due diligence review G-1001", "Grant policy › Due diligence overview"],
+    "handoff": null
+  }
+}
+```
+
+`outcome` is one of `answered`, `sign_in`, `generic` or `handoff`. `authorization.decision` is `allowed`,
+`limited` (general information only, for a donor who isn't verified), `blocked` or `not_reached`. `handoff` carries `case_id`, `team`,
+`reply_within_hours` and `mode` (`case` for chat, `transfer` for voice).
+
+## Sample donors (fictional)
+
+| Donor ID | Voice PIN | Account | What it shows |
+|---|---|---|---|
+| `D-01` | `1111` | Avery Family Giving Fund | One grant in every state |
+| `D-02` | `2222` | Shah Family Fund | Overdue review; a compliance-sensitive grant the assistant won't explain |
+| `D-03` | `3333` | Lee Charitable Fund | A single approved grant |
+| `D-04` | `4444` | Dalton Foundation | Suspended account: no self-service |
+
+### Things to try
+
+- **Not verified:** tap "I don't have my donor ID" → "How long does a grant review take?" (answered) → "Why is my grant pending?" (needs verification) → enter `D-01` (now answered).
+- **Chat:** ask "Why is my grant pending?" *before* signing in → enter `D-01` → pick Riverbend → "Can this be sped up?" (hand-off).
+- **Chat:** signed in as `D-01`, ask about `G-2001` (another donor's grant: blocked at authorization).
+- **Voice:** Start call → keypad `01#` → `1111#` → say "Why is my grant pending?" → press `1`.
+- **Voice:** type "My social is 123-45-6789, what about G-1001?" while verified as `D-03` (PII removed, then blocked).
+- Open **Show the Q&A contract (JSON)** after any message.
 
 ## Getting started
 
@@ -22,143 +144,71 @@ npm run dev        # http://localhost:5173
 
 | Script | What it does |
 |---|---|
-| `npm run dev` | Dev server with hot reload |
+| `npm run dev` | Dev server |
 | `npm run build` | Type-check and production build into `dist/` |
-| `npm run preview` | Serve the production build |
 | `npm run lint` | oxlint |
-| `npm run typecheck` | TypeScript (`tsc -b`) |
-| `npm test` | Playwright: user flows plus WCAG 2.1 AA checks (first time: `npx playwright install chromium`) |
-| `npm run test:a11y` | Only the WCAG 2.1 AA checks |
+| `npm test` | Playwright: chat and voice flows, question routing, WCAG 2.1 AA (first time: `npx playwright install chromium`) |
 | `npm run check` | Everything CI runs, in order |
 
-## Continuous integration
-
-- `.github/workflows/ci.yml` runs on every push to `main` and every pull request: install, lint, type-check, build,
-  then the Playwright suite (`tests/`). On failure, the HTML test report is attached to the run.
-- `.github/workflows/pages.yml` deploys `dist/` to GitHub Pages. It runs **only when started by hand**
-  (Actions → *Deploy to GitHub Pages* → *Run workflow*), because a Pages site is public. Turn it on first under
-  *Settings → Pages → Source: GitHub Actions*.
+CI (`.github/workflows/ci.yml`) runs lint, type-check, build and tests on every push and pull request.
+`pages.yml` deploys to GitHub Pages when started by hand.
 
 ### Tests
 
 | File | Covers |
 |---|---|
-| `tests/flows.spec.ts` | Why-pending → picker → grounded status card · expedite → escalation → callback → rep console · free-text grant ID · all sources down → hand-off · family-member access block · out-of-scope hand-off · audit rows |
-| `tests/a11y.spec.ts` | axe-core WCAG 2.1 A/AA on every view in light and dark · skip link (2.4.1) · page titles (2.4.2) · focus return (2.4.3) · keyboard tabs (2.1.1) · 320 px reflow (1.4.10) |
-
-## What you can do
-
-| View | What it shows |
-|---|---|
-| **Donor chat** | Self-service chat. Ask in your own words or tap suggestions. Grant status cards with a 4-step tracker, queue position and ETA, cited policy, escalation to a person and callback booking. |
-| **Under the hood** (right panel) | Live trace for every turn, grouped as **Understand → Reason → Act → Remember**: intent and confidence, guardrails, each tool call with its SQL and latency, fallbacks, session memory. Step back through earlier turns. |
-| **Rep console** | Cases the assistant escalated, live from the chat: AI summary, what the donor saw, tool log, transcript, SLA countdown, AI-drafted reply, call and resolve. |
-| **Audit log** | `gold.sf_tasks`: the 100 extract rows plus every row this session writes. |
-
-Demo controls (top of the donor view):
-
-- **Donor**: sign in as any donor in the extract (most grants first). Suspended and inactive accounts are blocked from self-service.
-- **Viewing as**: Account holder / Advisor (amounts masked) / Family member (no grant access). *Stand-ins until the real roles and data-access matrix arrive.*
-- **Data scenario**: walks the fallback chain from section 10 of the schema doc:
-  - *Normal*: gold layer fresh (0.6 h).
-  - *Gold stale*: gold is 6.2 h old (> 4 h target), so the agent refuses to serve it and falls through to Gemini DB `TDAF_GRANT`.
-  - *Athena down*: Athena times out, so the agent falls back to Gemini DB / Grant System API.
-  - *All sources down*: every source fails, so the agent says it won't guess, opens a case (HITL) and offers a callback.
-
-### Good things to try
-
-- "Why is my grant pending?" → pick a grant → "Can this be sped up?" → book a callback → **See what the rep sees**
-- "What is the status of GR-5053?" · "Is the Wright grant paid yet?" · "What is due diligence?"
-- "Where's my contribution?" (out of scope: future DAF / Transactions agents)
-- Switch to **Family member** and ask about a grant (authorization guardrail)
-- Pick **Hill Charitable Fund** (SUSPENDED) and ask about a grant
+| `tests/flows.spec.ts` | **Not-verified donor:** guest on chat (general answer, account question blocked then answered after verifying, contract `level: guest`), guest on voice through to an unverified transfer, forgotten PIN, general questions after lockout. **Rep console:** chat case and voice transfer arrive with summary and redacted transcript (no PII, no PIN), reply and resolve, cases survive start over, filters. **Donor and journey:** highlighted once verified, journey steps on chat and voice, lockout stops at verification. **Chat:** sign-in, question before sign-in, lockout, foreign grant blocked, suspended account, grounded answer, hand-off, generic replies, PII, contract fields. **Voice:** donor ID + PIN (PIN never shown), PIN lockout, numbered choices by keypad, choosing by name, question before verifying, transfer, PII and authorization on a call. |
+| `tests/questions.spec.ts` | Every question in `src/agent/questions.ts` routes to its expected intent, toolset and domain |
+| `tests/a11y.spec.ts` | axe-core WCAG 2.1 A/AA on chat, voice and the rep console in light and dark · skip link · page titles · focus return · whole call by keyboard · rep tabs by arrow keys · 320 px reflow |
 
 ## Project layout
 
 ```
-.github/workflows/  ci.yml (lint, type-check, build, tests) · pages.yml (manual GitHub Pages deploy)
-tests/              Playwright: flows.spec.ts, a11y.spec.ts
 src/
-  a11y/             wcag21.ts (WCAG 2.1 conformance data) · prefs.ts (text size, reduce motion)
-  data/
-    csv/            synthetic gold-layer extract (as shared, unmodified)
-    load.ts         CSV → typed rows
-    types.ts        row types (mirror the gold tables)
+  App.tsx              header, channel switch, sample-donor hint, layout
+  components/
+    DonorJourney.tsx   donor card + journey strip
+    ChatPane.tsx       chat channel
+    VoicePane.tsx      voice channel: call, keypad, captions, speech
+    FlowPanel.tsx      the five steps + Q&A contract view
+    RepConsole.tsx     case queue and case detail for hand-offs
+    MessageView.tsx    chat cards (grant list, status, policy, notices, hand-off)
   agent/
-    orchestrator.ts understand → reason → act → remember; escalation; callback booking
-    intent.ts       rule-based intent classifier (stand-in for the Bedrock model call)
-    tools.ts        the 6 MCP tools + fallback chain + audit rows
-    policy.ts       grounded status explanations + guardrails (sensitive / internal flags)
-    kb.ts           stand-in Knowledge Base passages (SAMPLE TEXT — replace)
-    clock.ts        demo clock (starts 2026-09-30 09:00 ET, the extract's load_date)
-    types.ts        trace, message, case types
-  state/store.ts    shared app state (chat, trace, cases, audit) via useSyncExternalStore
-  components/       DonorView (sidebar, chat, trace), MessageView (cards), RepConsole, AuditLog
+    orchestrator.ts    the Q&A loop: PII → authentication → authorization → grants agent / hand-off
+    contract.ts        the Q&A contract shape
+    intent.ts          routing: intent, toolset, domain (stand-in for the orchestrator model)
+    questions.ts       starter question set (replace with Sugu's golden set)
+    pii.ts             PII redaction (stand-in for Bedrock Guardrails)
+    tools.ts           mock agent tools over the sample records
+    policy.ts          grounded status sentences + compliance guardrails
+    kb.ts              placeholder knowledge-base passages
+  data/sample.ts       FICTIONAL sample records (the only data in the repo)
+  state/store.ts       app state: view, channel, call, auth, messages, last exchange, cases
 ```
 
 ## Going from prototype to the real agent
 
-The UI only depends on the return shapes in `src/agent/tools.ts` and the message and trace types in
-`src/agent/types.ts`. To connect the real stack:
+The UI depends only on the tool return shapes in `src/agent/tools.ts` and the `Exchange` type in
+`src/agent/types.ts`. To connect the real stack, Vanguard Charitable and its implementation partner would:
 
-1. Replace each tool body in `tools.ts` with a call to its AgentCore / MCP tool Lambda (keep `ctx.step(...)`
-   so the trace panel keeps working; feed it from AgentCore trace events).
-2. Replace `classify()` in `intent.ts` with the orchestrator's intent output.
-3. Replace `kb.ts` with Bedrock Knowledge Base retrieval (`RetrieveAndGenerate` citations map onto `KbPassage`).
-4. Move the guardrails in `policy.ts` to Bedrock Guardrails / the governance layer; keep the UI rules
-   (never show internal flags, withhold compliance-sensitive detail, ground every date and amount).
+1. Put Amazon Connect chat and voice in front of the same agent endpoint, sending the contract's `request`.
+2. Replace the donor ID step with real authentication (website sign-in for chat; Connect IVR verification for voice).
+3. Replace `classify()` with the orchestrator's routing, each tool body with the real tool call, and `kb.ts`
+   with Bedrock Knowledge Base retrieval.
+4. Replace `pii.ts` with Bedrock Guardrails sensitive-information filters.
 
-## Accessibility (WCAG 2.1 AA, also checked against 2.2 AA)
+## Accessibility
 
-The app has an **Accessibility** view (top navigation) that:
+Built to WCAG 2.1 AA and checked by tests (above). Captions are always shown on a call, so nothing depends
+on hearing the audio. Everything, including the keypad, works by keyboard. Status is shown in words as well
+as colour. Light and dark themes both meet contrast. Not yet done: testing with screen-reader users.
 
-- reports every WCAG 2.1 success criterion (Level A and AA target; AAA listed for completeness) with its status and how the prototype meets it, linked to the W3C Recommendation (https://www.w3.org/TR/WCAG21/). The data lives in `src/a11y/wcag21.ts`.
-- runs **axe-core 4.10 with the WCAG 2.1 A and AA rules** on each view, live in the browser (“Check all views”).
-- offers **display settings**: text size (100 / 125 / 150%) and Reduce motion, saved per browser (`src/a11y/prefs.ts`).
+## Not in this prototype
 
-Also added for WCAG 2.1:
-
-- a Skip to main content link (2.4.1)
-- per-view page titles (2.4.2)
-- pausable SLA countdowns in the rep console (2.2.2)
-- a note that changing the donor or role restarts the chat (3.2.2)
-
-
-Last checked on 2026-10-31 with axe-core 4.10 (WCAG 2.0/2.1/2.2 A and AA plus best practice), in light and dark, across:
-
-- the donor chat (initial, status card with an open citation, escalation and callback, advisor view)
-- the rep console (summary and tool-log tabs)
-- the audit log
-
-Result: **0 violations**. Also checked by hand:
-
-- **Contrast**: text is 4.5:1 or better in both themes. Form-field borders are 3:1 (`--field-line`). Accent text uses `--accent-text` so links stay readable on dark surfaces.
-- **Keyboard**: everything is reachable with Tab. Focus returns to the message box when the control you used disappears mid-turn. Rep-console tabs follow the WAI-ARIA pattern (arrow keys, Home and End). Scrollable regions (conversation, tables) can take focus.
-- **Focus visibility**: a 2px `--focus` ring everywhere, a lighter ring inside the dark trace panel, and an inset ring inside clipped lists.
-- **Screen readers**: the conversation is a polite live log. Status and toasts are announced from persistent live regions. Masked amounts read "Amount hidden for your role", not dots. Grant progress is stated in words (Done, Current, Upcoming), never by colour alone.
-- **Reflow**: no horizontal scrolling at 320 px. The chat comes first on narrow screens.
-- **Targets**: interactive controls are at least 24 × 24 px. Most are 40 px or more.
-- **Motion**: `prefers-reduced-motion` turns off animations and smooth scrolling.
-
-To re-run the scan, start `npm run dev`, then inject axe-core in the browser console or Playwright and run `axe.run()`.
-
-## Assumptions to confirm
-
-- **Roles**: Advisor and Family member behaviour is invented. Waiting on Sugu's roles, personas and data access.
-- **Knowledge base text** is placeholder. Replace with approved content before any external demo.
-- **Escalation reasons**: `Large amount` and `Missing docs` are explained to donors. `Donor VIP` and `Sanctions review` are treated as internal-only.
-- **Compliance-sensitive grants** (grantee IRS status not ACTIVE, sanctions flag, or sanctions review) are never explained in self-service. They go to a specialist.
-- **Case routing** uses `sf_case_types` exactly as provided. For example, "Grant Status Inquiry" goes to Compliance with a 48 h SLA.
-
-## Data notes (synthetic extract, 2026-09-30)
-
-- Every grant has a `due_diligence_queue` row, including funded and closed grants. The agent only calls
-  `check_due_diligence` for `PENDING_DD` grants and treats `grant_master` as the source of truth.
-- Some `FUNDED` grants only have `SCHEDULED` / `PENDING_WIRE` distributions, and 6 distributions have a blank status.
-  The UI trusts `grant_status` and only shows wire detail when a distribution is `WIRED` or `CLEARED`.
-- `sf_case_types` and `sf_escalation_queues` contain near-duplicates ("Grant Status Inquiry (2)", "Accounting #2")
-  with different teams and SLAs. The prototype uses the first, un-suffixed row.
-- `review_notes` and `result_summary` are placeholder text (masked in production), so they aren't shown to donors.
+- DynamoDB vs Athena volume and cost (Collins's to-do): an architecture decision, not a UI one.
+- Authorization beyond "own grants only", other personas, and the future mining and co-pilot layers.
+- The question browser, account sidebar and accessibility report from earlier versions, left out to keep
+  the prototype focused on the communication flow. (The rep console is back.)
 
 ## License
 

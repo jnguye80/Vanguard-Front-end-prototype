@@ -24,29 +24,21 @@ function renderAgent(m: Exclude<AgentMessage, { role: 'user' }>) {
     case 'grant_status': return <StatusCard view={m.view} />;
     case 'kb_answer': return <KbAnswer m={m} />;
     case 'notice': return <Notice m={m} />;
-    case 'escalation': return <EscalationCard caseId={m.caseId} />;
-    case 'callback': return <CallbackCard m={m} />;
-    case 'callback_confirmed': return <Confirmed m={m} />;
+    case 'handoff': return <HandoffCard m={m} />;
   }
-}
-
-/** Amount hidden for this role: shows dots visually, reads as words to screen readers. */
-export function Masked() {
-  return <><span aria-hidden="true">$•••,•••</span><span className="sr-only">Amount hidden for your role</span></>;
 }
 
 function GrantPicker({ m }: { m: Extract<AgentMessage, { kind: 'grant_picker' }> }) {
   const busy = useApp((s) => s.busy);
-  const role = useApp((s) => s.role);
   return (
     <div className="mcard picker">
       <div className="picker-head">{m.prompt}</div>
       {m.grants.map(({ grant: g, statusLabel, tone }) => (
         <button key={g.grant_id} type="button" disabled={busy}
-          onClick={() => runTurn({ type: 'pick_grant', grantId: g.grant_id, label: `${g.grantee_name} · ${role === 'advisor' ? g.grant_id : fmtMoney(g.grant_amount_usd)}` })}>
+          onClick={() => runTurn({ type: 'pick_grant', grantId: g.grant_id, label: `${g.grantee_name} · ${fmtMoney(g.grant_amount_usd)}` })}>
           <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
             <span style={{ fontWeight: 600, fontSize: 14 }}>{g.grantee_name}</span>
-            <span className="small muted">{role === 'advisor' ? <Masked /> : fmtMoney(g.grant_amount_usd)} · {g.grant_id} · submitted {fmtDate(g.submitted_date)}</span>
+            <span className="small muted">{fmtMoney(g.grant_amount_usd)} · {g.grant_id} · submitted {fmtDate(g.submitted_date)}</span>
           </span>
           <span className={`pill pill-${tone}`}>{statusLabel}</span>
         </button>
@@ -57,14 +49,13 @@ function GrantPicker({ m }: { m: Extract<AgentMessage, { kind: 'grant_picker' }>
 
 export function StatusCard({ view: v, compact = false }: { view: GrantStatusView; compact?: boolean }) {
   const [open, setOpen] = useState<string | null>(null);
-  const role = useApp((s) => s.role);
   const passage = v.citations.find((c) => c.id === open);
   return (
     <div className="mcard">
       <div className="status-top">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
           <span className="small muted">Grant {v.grant.grant_id}</span>
-          <span className="amount">{role === 'advisor' && !compact ? <Masked /> : fmtMoney(v.grant.grant_amount_usd)}</span>
+          <span className="amount">{fmtMoney(v.grant.grant_amount_usd)}</span>
           <span style={{ fontSize: 14 }}>to {v.grant.grantee_name}</span>
         </div>
         <span className={`pill pill-${v.tone}`}>{v.statusLabel}</span>
@@ -100,7 +91,7 @@ export function StatusCard({ view: v, compact = false }: { view: GrantStatusView
             </div>
           )}
           <div className="sources">
-            <span className="src"><Icon name="db" size={12} />From your account · grant record</span>
+            <span className="src"><Icon name="db" size={12} />From your grant record</span>
             {v.citations.map((c) => (
               <button key={c.id} type="button" className="src src-kb" aria-expanded={open === c.id} onClick={() => setOpen(open === c.id ? null : c.id)}>
                 <Icon name="doc" size={12} />{c.title} · {c.section}
@@ -116,7 +107,6 @@ export function StatusCard({ view: v, compact = false }: { view: GrantStatusView
           )}
         </>
       )}
-      <div className="card-foot"><span>{v.asOf}</span><span>{v.sources.join(' · ')}</span></div>
     </div>
   );
 }
@@ -148,64 +138,19 @@ function Notice({ m }: { m: Extract<AgentMessage, { kind: 'notice' }> }) {
   );
 }
 
-function EscalationCard({ caseId }: { caseId: string }) {
-  const c = useApp((s) => s.cases.find((x) => x.id === caseId));
-  if (!c) return null;
+function HandoffCard({ m }: { m: Extract<AgentMessage, { kind: 'handoff' }> }) {
   return (
     <div className="mcard" style={{ gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 14 }}>
-        <Icon name="checkCircle" size={18} stroke="var(--accent-text)" /> Request sent to our {c.team} team
+        <Icon name="checkCircle" size={18} stroke="var(--accent-text)" /> Passed to our {m.team} team
       </div>
       <dl className="kv">
-        <div><dt>Case</dt><dd>{c.id}</dd></div>
-        <div><dt>Type</dt><dd>{c.caseType}</dd></div>
-        <div><dt>Expected response</dt><dd>Within {c.slaHours} hours</dd></div>
-        <div><dt>Reason</dt><dd>{c.reason}</dd></div>
+        <div><dt>Case</dt><dd>{m.caseId}</dd></div>
+        <div><dt>Expected reply</dt><dd>Within {m.responseHours} hours</dd></div>
+        <div><dt>Reason</dt><dd>{m.reason}</dd></div>
       </dl>
-      <div className="ok-box">We’ve shared this conversation, so you won’t need to repeat yourself.</div>
-      <button type="button" className="link-btn" onClick={() => store.set({ view: 'rep', repSelected: c.id })}>See what the rep sees →</button>
-    </div>
-  );
-}
-
-function CallbackCard({ m }: { m: Extract<AgentMessage, { kind: 'callback' }> }) {
-  const busy = useApp((s) => s.busy);
-  return (
-    <div className="mcard" style={{ gap: 10 }}>
-      <div>
-        <div style={{ fontWeight: 600, fontSize: 14 }}>Want a call back?</div>
-        <div className="small muted">{m.queueLine}</div>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {m.slots.map((s) => (
-          <button key={s.id} type="button" className="slot" aria-pressed={m.chosen === s.label}
-            disabled={!!m.chosen || busy}
-            onClick={() => runTurn({ type: 'slot', caseId: m.caseId, slot: s.label, messageId: m.id })}>
-            <span style={{ fontWeight: 600, fontSize: 14 }}>{s.label}</span>
-            <span className="small muted">{m.chosen === s.label ? 'Selected' : s.sub}</span>
-          </button>
-        ))}
-      </div>
-      <span className="small muted">We’ll call the number on file.</span>
-    </div>
-  );
-}
-
-function Confirmed({ m }: { m: Extract<AgentMessage, { kind: 'callback_confirmed' }> }) {
-  const [added, setAdded] = useState(false);
-  return (
-    <div className="mcard" style={{ gap: 10 }}>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-        <span style={{ width: 40, height: 40, borderRadius: 10, background: 'var(--accent-soft)', color: 'var(--accent-text)', display: 'grid', placeItems: 'center' }}><Icon name="calendar" size={20} /></span>
-        <div>
-          <div style={{ fontWeight: 600, fontSize: 14 }}>Callback scheduled</div>
-          <div style={{ fontSize: 13 }}>{m.slot}</div>
-        </div>
-      </div>
-      <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>A {m.team} specialist will call the number on file. Reference {m.caseId}.</span>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button type="button" className="btn" aria-pressed={added} onClick={() => setAdded(true)}>{added ? 'Added to calendar' : 'Add to calendar'}</button>
-      </div>
+      <div className="ok-box">They’ll see this conversation, so you won’t need to repeat yourself.</div>
+      <button type="button" className="link-btn" onClick={() => store.set({ view: 'rep', repSelected: m.caseId })}>See what the rep sees →</button>
     </div>
   );
 }

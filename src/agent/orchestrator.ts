@@ -1,46 +1,60 @@
-// Supervising orchestrator: understand → reason → act → remember.
-// Mirrors the Bedrock orchestrator + Grants specialist skill. Everything the donor sees is built from
-// tool output; anything the agent can't ground or isn't allowed to say goes to a human with full context.
+// The question-and-answer loop, the same for both channels (Amazon Connect chat and voice):
+//
+//   1. Channel        the donor's words arrive (typed in chat; spoken or keyed on a call)
+//   2. PII guardrail  personal data is removed before anything else sees the message
+//   3. Authentication who is this? Chat: donor ID. Voice: donor ID, then a PIN on the keypad.
+//   4. Authorization  what may they see? MVP: only grants on their own account.
+//   5. Grants agent   route to a toolset, call the tools, answer only from what they return,
+//                     or hand off to a person (a case in chat, a transfer on a call).
+//
+// Each turn produces an `Exchange` (src/agent/types.ts): the flow panel draws it, and it is the shape of
+// the lightweight Q&A contract.
 
-import { demoDonors, dueDiligence, grants } from '../data/load';
+import { demoDonors, dueDiligence, grants } from '../data/sample';
 import type { DueDiligence, Grant } from '../data/types';
 import {
-  appendTask, DEFAULT_SUGGESTIONS, store, uid,
+  DEFAULT_SUGGESTIONS, SIGN_IN_SUGGESTIONS, VOICE_SIGN_IN_SUGGESTIONS, store, uid,
   type Chip, type Memory, type TurnInput,
 } from '../state/store';
 import { fmtMoney, now } from './clock';
-import { classify, type Intent } from './intent';
-import { buildStatusView, PUBLIC_REASON, sensitivity, statusLabel } from './policy';
+import { classify, FUTURE_DOMAINS, toolsetLabel, TOOLSETS, type Classification, type Intent } from './intent';
+import { containsPii, describeFindings, redactPii } from './pii';
+import { buildStatusView, sensitivity, statusLabel } from './policy';
 import {
-  AllSourcesDown, checkDueDiligence, createServiceRequest, getDonorProfile, getGrantStatus,
-  listGrants, readQueue, scheduleFollowUp, searchKnowledgeBase, type ToolCtx,
+  checkDueDiligence, createServiceRequest, getDonorProfile, getGrantStatus,
+  listGrants, readQueue, searchKnowledgeBase, verifyCaller, type ToolCtx,
 } from './tools';
-import type { AgentMessage, CaseRecord, GrantStatusView, Phase, TraceKind } from './types';
+import type { AgentMessage, CaseRecord, Exchange, GrantStatusView, Phase, TraceKind } from './types';
 
 type DistOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 type NewMessage = DistOmit<AgentMessage, 'id'>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const DONOR_ID = /\bd-?(\d{2})\b/i;
+const MAX_ATTEMPTS = 3;
+/** "I don't have my donor ID", "forgot my PIN", "continue without signing in"… */
+const NO_ID = /\b(don[’']?t|do not|can[’']?t|cannot)\s+(have|know|remember|find)\b|\bforgot\b|\bwithout (signing in|verifying|an? id)\b|\b(no|lost) (donor )?(id|pin)\b|\bas a guest\b|\bskip\b/i;
+
+export const AUTH_METHOD = {
+  chat: 'Donor ID typed in chat (stand-in for website sign-in)',
+  voice: 'Donor ID + PIN on the keypad (stand-in for phone verification)',
+} as const;
+
+const isVoice = () => store.get().channel === 'voice';
+
+// ------------------------------------------------------------------ helpers
 
 function makeCtx(turn: number): ToolCtx {
-  const s = store.get();
   return {
-    scenario: s.scenario,
-    step(phase: Phase, kind: TraceKind, label: string, detail: string, sql?: string) {
+    step(phase: Phase, kind: TraceKind, label: string, detail: string) {
       const id = uid('t');
-      const started = performance.now();
-      store.set((st) => ({ trace: [...st.trace, { id, turn, phase, kind, label, detail, sql, status: 'running' }] }));
+      store.set((st) => ({ trace: [...st.trace, { id, turn, phase, kind, label, detail, status: 'running' }] }));
       return {
-        finish(status, d, ms) {
-          store.set((st) => ({
-            trace: st.trace.map((e) => (e.id === id
-              ? { ...e, status, detail: d ?? e.detail, ms: ms ?? Math.round(performance.now() - started) }
-              : e)),
-          }));
+        finish(status, d) {
+          store.set((st) => ({ trace: st.trace.map((e) => (e.id === id ? { ...e, status, detail: d ?? e.detail } : e)) }));
         },
       };
     },
-    audit: (t) => appendTask(t),
   };
 }
 
@@ -54,151 +68,243 @@ function patchMessage(id: string, fn: (m: AgentMessage) => AgentMessage) {
   store.set((s) => ({ messages: s.messages.map((m) => (m.id === id ? fn(m) : m)) }));
 }
 
-function remember(ctx: ToolCtx, patch: Partial<Memory>) {
-  const memory = { ...store.get().memory, ...patch };
-  store.set({ memory });
-  const h = ctx.step('remember', 'memory', 'Session memory',
-    [memory.currentGrantId && `grant ${memory.currentGrantId}`, memory.lastIntent && `last intent ${memory.lastIntent}`, memory.openCaseId && `open case ${memory.openCaseId}`]
-      .filter(Boolean).join(' · ') || 'nothing to keep');
-  h.finish('ok', undefined, 2);
+function setExchange(patch: Partial<Exchange> | ((e: Exchange) => Partial<Exchange>)) {
+  store.set((s) => {
+    if (!s.exchange) return {};
+    const p = typeof patch === 'function' ? patch(s.exchange) : patch;
+    return { exchange: { ...s.exchange, ...p } };
+  });
+}
+
+const addSource = (src: string) => setExchange((e) => ({ sources: e.sources.includes(src) ? e.sources : [...e.sources, src] }));
+const allow = (detail: string) => setExchange({ authorization: { status: 'allowed', detail } });
+const block = (detail: string) => setExchange({ authorization: { status: 'blocked', detail } });
+
+function remember(patch: Partial<Memory>) {
+  store.set((s) => ({ memory: { ...s.memory, ...patch } }));
 }
 
 const chips = (...labels: string[]): Chip[] => labels.map((label) => ({ label, input: { type: 'text', text: label } }));
 
+function currentDonor() {
+  const id = store.get().auth.donorId;
+  return id ? demoDonors().find((d) => d.donor.donor_id === id)?.donor : undefined;
+}
+
+function authNow(): Exchange['authentication'] {
+  const { auth, channel } = store.get();
+  const method = AUTH_METHOD[channel];
+  if (auth.donorId) return { status: 'verified', method, donorId: auth.donorId, detail: `Verified as ${auth.donorId}` };
+  if (auth.locked) return { status: 'locked', method, detail: `Stopped after ${MAX_ATTEMPTS} failed attempts · general questions only` };
+  if (auth.guest) return { status: 'guest', method, detail: 'Continuing without verifying · general questions only' };
+  if (auth.candidateId) return { status: 'needed', method, donorId: auth.candidateId, detail: `Donor ID ${auth.candidateId} found · waiting for PIN` };
+  return { status: 'needed', method, detail: 'Not verified yet' };
+}
+
+// ------------------------------------------------------------------ how each message reads in each channel
+
+/** Chat transcript text (also used for the output guardrail). */
 export function messageToText(m: AgentMessage): string {
   if (m.role === 'user') return m.text;
   switch (m.kind) {
     case 'text': return m.text;
-    case 'grant_picker': return `[Grant list] ${m.prompt}`;
-    case 'grant_status': return `[Grant status card] ${m.view.statusLabel}. ${m.view.explanation}`;
-    case 'kb_answer': return `${m.text} [Cited: ${m.passages.map((p) => p.section).join('; ')}]`;
-    case 'notice': return `[${m.title}] ${m.body}`;
-    case 'escalation': return `[Case created] ${m.caseId}`;
-    case 'callback': return `[Callback options] ${m.slots.map((s) => s.label).join(' / ')}`;
-    case 'callback_confirmed': return `[Callback booked] ${m.slot}`;
+    case 'grant_picker': return `${m.prompt} ${m.grants.map((x) => `${x.grant.grantee_name} (${x.statusLabel})`).join('; ')}`;
+    case 'grant_status': return m.view.explanation;
+    case 'kb_answer': return m.text;
+    case 'notice': return `${m.title}. ${m.body}`;
+    case 'handoff': return handoffText(m);
   }
+}
+
+/** What the assistant says out loud on a call. No cards on the phone: lists become numbered choices. */
+export function toSpeech(m: AgentMessage): string {
+  if (m.role === 'user') return m.text;
+  switch (m.kind) {
+    case 'text': return m.text;
+    case 'grant_picker':
+      return `${m.prompt} ${m.grants.map((x, i) => `Press ${i + 1} for ${x.grant.grantee_name}, ${fmtMoney(x.grant.grant_amount_usd)}.`).join(' ')} Or say the charity’s name.`;
+    case 'grant_status': return m.view.explanation;
+    case 'kb_answer': return `${m.text} That’s from our grant policy.`;
+    case 'notice': return m.body;
+    case 'handoff': return handoffText(m);
+  }
+}
+
+function handoffText(m: Extract<AgentMessage, { kind: 'handoff' }>) {
+  return m.mode === 'transfer'
+    ? `I’m transferring you to our ${m.team} team now. They’ll see what we talked about, so you won’t need to repeat yourself. Your case number is ${m.caseId}.`
+    : `I’ve passed this to our ${m.team} team as case ${m.caseId}. They’ll reply within ${m.responseHours} hours, and they’ll see this conversation.`;
 }
 
 // ------------------------------------------------------------------ entry point
 
 export async function runTurn(input: TurnInput) {
   const s0 = store.get();
-  if (s0.busy) return;
+  if (s0.busy || s0.auth.locked && !s0.auth.donorId && input.type === 'keypad') return;
+  if (s0.channel === 'voice' && s0.call !== 'active') return;
   const turn = s0.turn + 1;
-  const userText = input.type === 'text' ? input.text : input.type === 'pick_grant' ? input.label : `Call me ${input.slot}`;
+
+  // What the user did, as the transcript shows it. A PIN is never shown or stored.
+  const pinStage = s0.channel === 'voice' && !!s0.auth.candidateId && !s0.auth.donorId;
+  let raw: string;
+  if (input.type === 'keypad') raw = pinStage ? `Keypad: ${'•'.repeat(input.digits.replace(/\D/g, '').length)}` : `Keypad: ${input.digits}`;
+  else if (input.type === 'pick_grant') raw = input.label;
+  else raw = input.text;
+  const pinSpoken = pinStage && input.type === 'text' && /^\D*\d{4}\D*$/.test(input.text);
+  if (pinSpoken) raw = '••••';
+
+  // 2. PII guardrail first: nothing downstream (transcript, flow panel, contract, case) sees the raw text.
+  const { text: userText, findings } = redactPii(raw);
   store.set((s) => ({
     busy: true, turn, suggestions: [],
     messages: [...s.messages, { id: uid('m'), role: 'user', text: userText }],
+    exchange: {
+      turn, channel: s.channel, question: userText,
+      piiRemoved: [...new Set(findings.map((f) => f.label))],
+      authentication: authNow(),
+      authorization: { status: 'not_reached', detail: 'No account data needed yet' },
+      tools: [], sources: [], answer: '', outcome: 'answered',
+    },
   }));
+  if (findings.length) {
+    say({
+      role: 'agent', kind: 'notice', tone: 'lock', title: 'I removed personal information from your message',
+      body: `For your security I removed ${describeFindings(findings)}. I never need it to look up a grant, so please don’t share it here.`,
+    });
+  }
+
   const ctx = makeCtx(turn);
+  const before = store.get().messages.length;
+  const effective: TurnInput =
+    input.type === 'text' ? { type: 'text', text: pinSpoken ? input.text : userText } : input;
   try {
-    await handle(ctx, input, userText);
+    await sleep(160 + Math.random() * 80);
+    await handle(ctx, effective, userText);
   } catch (err) {
     console.error(err);
-    say({ role: 'agent', kind: 'notice', tone: 'error', title: 'Something went wrong', body: 'I couldn’t finish that. You can try again or talk to someone.' });
+    say({ role: 'agent', kind: 'notice', tone: 'error', title: 'Something went wrong', body: 'I couldn’t finish that. You can try again or talk to a person.' });
     store.set({ suggestions: chips('Talk to a person') });
   } finally {
+    const replies = store.get().messages.slice(before).filter((m) => m.role === 'agent');
+    const answer = replies.map(isVoice() ? toSpeech : messageToText).join(' ');
+    const leaked = containsPii(answer);
+    const tools = [...new Set(store.get().trace.filter((e) => e.turn === turn && ['tool', 'kb', 'auth', 'write'].includes(e.kind)).map((e) => e.label))];
+    setExchange({ answer: leaked ? '[blocked by output guardrail]' : answer, tools, authentication: authNow() });
     store.set({ busy: false });
   }
 }
 
-async function handle(ctx: ToolCtx, input: TurnInput, userText: string) {
+async function handle(ctx: ToolCtx, input: TurnInput, userText: string): Promise<void> {
   const s = store.get();
-  const donor = demoDonors().find((d) => d.donor.donor_id === s.donorId)!.donor;
+
+  // 3. AUTHENTICATION -------------------------------------------------------
+  if (!s.auth.donorId) return authenticate(ctx, input, userText);
+
+  const donor = currentDonor()!;
   const donorGrants = grants.filter((g) => g.donor_id === donor.donor_id);
 
-  // UNDERSTAND --------------------------------------------------------------
-  const a = ctx.step('understand', 'auth', 'Session check', `Donor Authentication Platform · ${donor.donor_id} · role: ${roleName(s.role)}`);
-  await sleep(30);
-  a.finish('ok', undefined, 28);
-
-  if (input.type === 'slot') return bookCallback(ctx, input.caseId, input.slot, input.messageId, donor.donor_id);
-
-  let intent: Intent;
-  let grantRef: string | undefined;
-  if (input.type === 'pick_grant') {
-    intent = s.memory.pendingIntent ?? 'status';
-    grantRef = input.grantId;
-    const h = ctx.step('understand', 'intent', `Selection · ${intent}`, `donor picked ${input.grantId} (continuing earlier request)`);
-    h.finish('ok', undefined, 3);
-  } else {
-    const h = ctx.step('understand', 'intent', 'Intent', 'Bedrock orchestrator · classifying…');
-    await sleep(180 + Math.random() * 80);
-    const c = classify(input.text, donorGrants);
-    intent = c.intent;
-    grantRef = c.grantRef ?? (!c.wantsOther && isFollowUp(intent) ? s.memory.currentGrantId : undefined);
-    h.finish(c.confidence < 0.6 ? 'warn' : 'ok',
-      `${c.intent} · confidence ${c.confidence.toFixed(2)}${c.grantRef ? ` · grant ${c.grantRef}` : grantRef ? ` · grant ${grantRef} (from memory)` : ''} → ${routeFor(c.intent)}`);
+  // Keypad on a verified call: a number picks from the list just offered, 0 asks for a person.
+  if (input.type === 'keypad') {
+    const d = input.digits.replace(/\D/g, '');
+    if (d === '0') return handle(ctx, { type: 'text', text: 'Talk to a person' }, 'Talk to a person');
+    const g = s.memory.offered?.[Number(d) - 1];
+    if (!g) {
+      say({ role: 'agent', kind: 'text', text: 'Sorry, that isn’t one of the options. You can say your question, or press 0 for a person.' });
+      setExchange({ outcome: 'generic' });
+      return;
+    }
+    input = { type: 'pick_grant', grantId: g, label: '' };
   }
 
-  // REASON + ACT ------------------------------------------------------------
-  switch (intent) {
+  // Understand: route to an agent and toolset.
+  let c: Classification;
+  if (input.type === 'pick_grant') {
+    const intent = s.memory.pendingIntent ?? 'status';
+    c = { ...classify(intentPhrase(intent), donorGrants), intent, grantRef: input.grantId, confidence: 1, domain: 'grants' };
+  } else {
+    c = classify(userText, donorGrants);
+    // A caller answering "which grant?" by name.
+    if (c.grantRef && c.intent === 'unknown' && s.memory.pendingIntent) c = { ...c, intent: s.memory.pendingIntent, toolset: classify(intentPhrase(s.memory.pendingIntent), donorGrants).toolset, domain: 'grants' };
+    if (!c.grantRef && !c.wantsOther && isFollowUp(c.intent) && s.memory.currentGrantId) c = { ...c, grantRef: s.memory.currentGrantId };
+  }
+  setExchange({ routing: routing(c) });
+
+  // 5. Answer, generic reply, or hand-off -----------------------------------
+  switch (c.intent) {
     case 'greeting':
-      say({ role: 'agent', kind: 'text', text: `Hi! I can check on any of your grants. Which one would you like to know about?` });
+      say({ role: 'agent', kind: 'text', text: 'Hi! I can check on any of your grants. Which one would you like to know about?' });
       store.set({ suggestions: DEFAULT_SUGGESTIONS });
-      return remember(ctx, { lastIntent: intent });
+      return remember({ lastIntent: c.intent });
     case 'thanks':
-      say({ role: 'agent', kind: 'text', text: 'You’re welcome. Anything else about your grants?' });
+      say({ role: 'agent', kind: 'text', text: isVoice() ? 'You’re welcome. Is there anything else about your grants? If not, you can hang up.' : 'You’re welcome. Anything else about your grants?' });
       store.set({ suggestions: chips('Show all my grants', 'Where’s my grant?') });
-      return remember(ctx, { lastIntent: intent });
-    case 'unknown': {
-      const g = ctx.step('reason', 'guard', 'Low confidence', 'ask a clarifying question instead of guessing');
-      g.finish('warn', undefined, 1);
-      say({ role: 'agent', kind: 'text', text: 'I’m not sure I followed. I can help with grant questions, like where a grant is, why it’s pending, or when the charity gets paid.' });
+      return remember({ lastIntent: c.intent });
+    case 'unknown':
+      say({ role: 'agent', kind: 'text', text: 'I’m not sure I followed. I can help with grants on your account, like where a grant is, why it’s pending, or when the charity gets paid.' });
+      setExchange({ outcome: 'generic' });
       store.set({ suggestions: DEFAULT_SUGGESTIONS });
-      return remember(ctx, { lastIntent: intent });
-    }
+      return remember({ lastIntent: c.intent });
     case 'out_of_scope': {
-      const g = ctx.step('reason', 'guard', 'Scope check', 'not a grants question → DAF / Transactions agent (future phase) → offer a person');
-      g.finish('warn', undefined, 2);
-      say({ role: 'agent', kind: 'text', text: 'I can only help with grant questions right now. Questions about contributions, balances and statements are coming soon. In the meantime, I can connect you with a person.' });
+      const d = FUTURE_DOMAINS.find((x) => x.key === c.domain);
+      say({
+        role: 'agent', kind: 'text',
+        text: `That’s outside what I can help with here. Right now I only answer questions about grants on your account: status, reviews and payments.${d ? ` For questions about ${d.reply}, I can connect you with a person.` : ' I can connect you with a person for anything else.'}`,
+      });
+      setExchange({ outcome: 'generic' });
       store.set({ suggestions: chips('Talk to a person', 'Show all my grants') });
-      return remember(ctx, { lastIntent: intent });
+      return remember({ lastIntent: c.intent });
     }
+    case 'submission':
+      say({ role: 'agent', kind: 'text', text: `I can’t start, change or cancel grants ${isVoice() ? 'on this line' : 'in this chat'} yet. I can tell you where an existing grant is, or connect you with a person who can help.` });
+      setExchange({ outcome: 'generic' });
+      store.set({ suggestions: chips('Talk to a person', 'Show all my grants') });
+      return remember({ lastIntent: c.intent });
     case 'policy': {
-      const passages = await searchKnowledgeBase(ctx, userText, { donor_id: donor.donor_id });
-      groundingCheck(ctx, passages.length > 0 ? 'answer uses retrieved policy passages only' : 'no passage found → no answer');
+      const passages = await searchKnowledgeBase(ctx, userText);
       if (!passages.length) {
         say({ role: 'agent', kind: 'text', text: 'I don’t have approved information on that. A specialist can help.' });
+        setExchange({ outcome: 'generic' });
         store.set({ suggestions: chips('Talk to a person') });
       } else {
+        passages.forEach((p) => addSource(`${p.title} › ${p.section}`));
         say({ role: 'agent', kind: 'kb_answer', text: passages[0].text, passages });
         store.set({ suggestions: chips('Where’s my grant?', 'Can this be sped up?', 'Talk to a person') });
       }
-      return remember(ctx, { lastIntent: intent });
+      return remember({ lastIntent: c.intent });
     }
     case 'human':
-      await escalate(ctx, {
-        caseType: s.memory.currentGrantId ? 'Grant Status Inquiry' : 'Grant Status Inquiry',
-        reason: 'Donor asked for a person', donorWords: userText, intro: 'Of course. I’ve shared this conversation with our team so you won’t need to repeat yourself.',
-      });
-      return remember(ctx, { lastIntent: intent });
+      await handOff(ctx, 'Grant Status Inquiry', 'Donor asked for a person');
+      return remember({ lastIntent: c.intent });
     case 'list': {
-      if (!(await authorized(ctx))) return;
-      let all: Grant[];
-      try { all = await listGrants(ctx, donor.donor_id); } catch (e) { return allDown(ctx, e, userText); }
-      say({ role: 'agent', kind: 'grant_picker', prompt: `You have ${all.length} grants. Tap one for details.`, grants: all.map(pick) });
-      store.set({ suggestions: chips('Talk to a person') });
-      return remember(ctx, { lastIntent: intent, pendingIntent: 'status' });
+      if (!(await accountActive(ctx))) return;
+      const all = await listGrants(ctx, donor.donor_id);
+      allow(`Listed only ${donor.donor_id}’s grants`);
+      addSource(`Grant records for ${donor.donor_id}`);
+      say({ role: 'agent', kind: 'grant_picker', prompt: `You have ${all.length} grants.${isVoice() ? '' : ' Tap one for details.'}`, grants: all.map(pick) });
+      store.set({ suggestions: pickChips(all) });
+      return remember({ lastIntent: c.intent, pendingIntent: 'status', offered: all.map((g) => g.grant_id) });
     }
     default:
-      return grantFlow(ctx, intent, grantRef, userText);
+      return grantFlow(ctx, c.intent, c.grantRef);
   }
+}
+
+function routing(c: Classification): Exchange['routing'] {
+  if (c.intent === 'human') return { intent: c.intent, agent: 'Hand-off to a person', live: true };
+  if (c.intent === 'out_of_scope') {
+    const d = FUTURE_DOMAINS.find((x) => x.key === c.domain);
+    return { intent: c.intent, agent: d ? `${d.label} agent (future)` : 'Outside grants', live: false };
+  }
+  const live = TOOLSETS.find((t) => t.key === c.toolset)?.live ?? true;
+  return { intent: c.intent, agent: 'Grants agent', toolset: c.toolset ? toolsetLabel(c.toolset) : undefined, live };
+}
+
+function intentPhrase(i: Intent) {
+  return ({ why_pending: 'why pending', expedite: 'speed up', payment: 'paid', declined: 'declined' } as Partial<Record<Intent, string>>)[i] ?? 'status';
 }
 
 function isFollowUp(i: Intent) {
   return ['why_pending', 'expedite', 'payment', 'declined', 'status'].includes(i);
-}
-
-function routeFor(i: Intent) {
-  if (['status', 'why_pending', 'payment', 'declined', 'expedite', 'list', 'policy'].includes(i)) return 'Grants agent';
-  if (i === 'human') return 'Escalation';
-  if (i === 'out_of_scope') return 'no agent in scope';
-  return 'Orchestrator';
-}
-
-function roleName(r: string) {
-  return r === 'holder' ? 'account holder' : r === 'advisor' ? 'advisor' : 'family member';
 }
 
 function pick(g: Grant) {
@@ -206,65 +312,218 @@ function pick(g: Grant) {
   return { grant: g, statusLabel: label, tone };
 }
 
-function groundingCheck(ctx: ToolCtx, detail: string) {
-  const h = ctx.step('reason', 'guard', 'Grounding check', detail);
-  h.finish('ok', undefined, 12);
+/** On a call the caller can also just say the charity's name. */
+function pickChips(list: Grant[]): Chip[] {
+  return isVoice() ? list.slice(0, 4).map((g) => ({ label: g.grantee_name, input: { type: 'text', text: g.grantee_name } })) : chips('Talk to a person');
 }
 
-async function authorized(ctx: ToolCtx): Promise<boolean> {
+// ------------------------------------------------------------------ 3. authentication
+
+async function authenticate(ctx: ToolCtx, input: TurnInput, userText: string) {
   const s = store.get();
-  const h = ctx.step('reason', 'guard', 'Authorization', `role: ${roleName(s.role)} · scope grants:read`);
-  await sleep(10);
-  if (s.role === 'family') {
-    h.finish('fail', `role: family member · no grants:read scope → details withheld`, 9);
-    say({
-      role: 'agent', kind: 'notice', tone: 'lock', title: 'You don’t have access to grant details',
-      body: 'Grant details are visible to the account holder and people they’ve given access to. Ask the account holder to update your access, or I can connect you with our team.',
-    });
-    store.set({ suggestions: chips('Talk to a person') });
-    remember(ctx, {});
-    return false;
+  const voice = isVoice();
+  setExchange({ outcome: 'sign_in' });
+  const c = classify(input.type === 'text' ? userText : '', []);
+  const noId = input.type === 'text' && NO_ID.test(userText);
+
+  // Anyone can ask for a person, verified or not. The rep verifies them.
+  if (input.type === 'text' && c.intent === 'human') {
+    const why = s.auth.locked ? 'Could not verify identity' : s.auth.guest ? 'Unverified donor asked for a person' : voice ? 'Caller asked for a person before verifying' : 'Visitor asked for a person before signing in';
+    await handOff(ctx, 'Grant Status Inquiry', why);
+    return;
   }
-  h.finish('ok', s.role === 'advisor' ? 'role: advisor → status visible, amounts masked' : 'role: account holder → full access', 9);
-  return true;
-}
 
-async function allDown(ctx: ToolCtx, err: unknown, userText: string) {
-  if (!(err instanceof AllSourcesDown)) throw err;
-  const h = ctx.step('reason', 'guard', 'Fallback exhausted', 'gold → Gemini DB → Grant System API all failed → HITL (don’t guess)');
-  h.finish('fail', undefined, 1);
+  // Voice, step 2 of 2: the PIN.
+  if (voice && s.auth.candidateId) {
+    if (noId) return enterGuest();
+    const digits = (input.type === 'keypad' ? input.digits : input.type === 'text' ? input.text : '').replace(/\D/g, '');
+    if (digits.length !== 4) {
+      say({ role: 'agent', kind: 'text', text: 'Please enter your four-digit PIN on the keypad. If you don’t know it, just say so.' });
+      return;
+    }
+    const ok = await verifyCaller(ctx, s.auth.candidateId, digits);
+    if (!ok) return failedAttempt('That PIN didn’t match. Please enter it again.');
+    return verified(ctx, s.auth.candidateId);
+  }
+
+  // Step 1: the donor ID. Chat: "D-01". Voice: "01#" on the keypad (or said out loud).
+  const text = input.type === 'text' ? userText : input.type === 'keypad' ? input.digits : '';
+  const m = text.match(DONOR_ID) ?? (voice || input.type === 'keypad' ? text.match(/^\D*(\d{1,2})\s*#?\s*$/) : null);
+  if (m) {
+    if (s.auth.locked) {
+      say({ role: 'agent', kind: 'text', text: 'For your security I can’t try verifying again in this conversation. You can still ask general questions, or I can connect you with a person who can verify you.' });
+      store.set({ suggestions: guestChips() });
+      return;
+    }
+    const id = `D-${m[1].padStart(2, '0')}`;
+    const donor = await getDonorProfile(ctx, id);
+    if (!donor) return failedAttempt(voice ? 'I couldn’t find that donor ID. Please enter it again, then press pound.' : `I couldn’t find donor ID ${id}. Please check it and try again.`);
+    if (voice) {
+      store.set((st) => ({ auth: { ...st.auth, candidateId: id } }));
+      say({ role: 'agent', kind: 'text', text: 'Thanks. For your security, enter your four-digit PIN.' });
+      return;
+    }
+    return verified(ctx, id);
+  }
+
+  if (noId) return enterGuest();
+
+  if (input.type === 'text' && /^(verify|sign in|log in)\b/i.test(userText.trim())) {
+    say({ role: 'agent', kind: 'text', text: voice ? 'Sure. Enter your donor ID on your keypad, then press pound.' : 'Sure. Please enter your donor ID.' });
+    store.set({ suggestions: voice ? [] : SIGN_IN_SUGGESTIONS });
+    return;
+  }
+
+  // Not verified, by choice or after too many tries: general questions only.
+  if (s.auth.guest || s.auth.locked) return guestTurn(ctx, userText, c);
+
+  // A question before verifying: keep it, ask for the ID, answer it right after (or offer the guest route).
   say({
-    role: 'agent', kind: 'notice', tone: 'error', title: 'I can’t reach our grant systems right now',
-    body: 'I won’t guess about your grant. I’ve passed your question to our team so a person can check it directly.',
+    role: 'agent', kind: 'text',
+    text: voice
+      ? 'I can help with that. First, enter your donor ID on your keypad, then press pound. If you don’t know it, just say so.'
+      : 'I can help with that. First, please enter your donor ID so I only show grants on your account. If you don’t have it, I can still answer general questions.',
   });
-  await escalate(ctx, { caseType: 'Grant Status Inquiry', reason: 'Grant data unavailable: all sources down', donorWords: userText });
+  store.set({ suggestions: voice ? VOICE_SIGN_IN_SUGGESTIONS : SIGN_IN_SUGGESTIONS });
+  if (input.type === 'text') remember({ pendingQuestion: userText });
 }
 
-// ------------------------------------------------------------------ grant flow
+// ------------------------------------------------------------------ not-verified donor (guest)
 
-async function grantFlow(ctx: ToolCtx, intent: Intent, grantRef: string | undefined, userText: string) {
+function guestChips(): Chip[] {
+  const locked = store.get().auth.locked;
+  return chips('What is due diligence?', 'How long does a grant review take?', 'How are approved grants paid?', ...(locked ? [] : ['Verify with my donor ID']), 'Talk to a person');
+}
+
+/** The donor can't or won't verify: carry on with general questions only. */
+function enterGuest() {
+  const voice = isVoice();
+  store.set((st) => ({ auth: { ...st.auth, guest: true, candidateId: undefined } }));
+  setExchange({
+    authentication: authNow(),
+    authorization: { status: 'limited', detail: 'Not verified → general grant information only, no account data' },
+  });
+  say({
+    role: 'agent', kind: 'text',
+    text: voice
+      ? 'No problem. Without verifying, I can answer general questions about how grants work, like what a charity review is or how grants are paid. I can’t discuss your grants until you’re verified. You can enter your donor ID at any time, or ask for a person who can verify you.'
+      : 'No problem. Without signing in, I can answer general questions about how grants work, like what due diligence is or how grants are paid. I can’t look up your grants until you’re verified. You can enter your donor ID at any time, or talk to a person who can verify you.',
+  });
+  store.set({ suggestions: guestChips() });
+}
+
+async function guestTurn(ctx: ToolCtx, userText: string, c: Classification) {
+  const voice = isVoice();
+  setExchange({ routing: routing(c), outcome: 'generic' });
+  const accountSpecific = !!c.grantRef || /\b(my|mine|our)\b/i.test(userText) || ['list', 'status'].includes(c.intent);
+  const general = ['policy', 'why_pending', 'payment', 'expedite', 'declined'].includes(c.intent);
+
+  if (c.intent === 'out_of_scope' || c.intent === 'submission') {
+    say({ role: 'agent', kind: 'text', text: 'That’s outside what I can help with here. I can answer general questions about grants, or connect you with a person.' });
+    store.set({ suggestions: guestChips() });
+    return;
+  }
+  if (accountSpecific && (general || c.intent === 'status' || c.intent === 'list')) {
+    block('Not verified → no account data');
+    say({
+      role: 'agent', kind: 'text',
+      text: store.get().auth.locked
+        ? 'I can’t look up your grants because I couldn’t verify you. A person can verify you and help with your grants.'
+        : voice
+          ? 'I can’t look up your grants until you’re verified. Enter your donor ID on your keypad, then press pound, or ask for a person who can verify you.'
+          : 'I can’t look up your grants until you’re verified. Enter your donor ID to verify, or talk to a person who can verify you and help.',
+    });
+    store.set({ suggestions: guestChips() });
+    remember({ pendingQuestion: userText });
+    return;
+  }
+  if (general) {
+    const passages = await searchKnowledgeBase(ctx, userText);
+    if (passages.length) {
+      setExchange({ outcome: 'answered', authorization: { status: 'limited', detail: 'General grant information only (no account data)' } });
+      passages.forEach((p) => addSource(`${p.title} › ${p.section}`));
+      say({ role: 'agent', kind: 'kb_answer', text: passages[0].text, passages });
+      store.set({ suggestions: guestChips() });
+      return;
+    }
+  }
+  say({ role: 'agent', kind: 'text', text: `I can answer general questions about how grants work${store.get().auth.locked ? '' : ', or look up your grants once you’re verified'}. A person can help with anything else.` });
+  store.set({ suggestions: guestChips() });
+}
+
+function failedAttempt(retryText: string) {
   const s = store.get();
-  if (!(await authorized(ctx))) return;
+  const attempts = s.auth.attempts + 1;
+  const locked = attempts >= MAX_ATTEMPTS;
+  store.set({ auth: { ...s.auth, attempts, locked, candidateId: locked ? undefined : s.auth.candidateId } });
+  setExchange({ authentication: authNow() });
+  if (locked) {
+    setExchange({ authorization: { status: 'limited', detail: 'Not verified → general grant information only, no account data' } });
+    say({ role: 'agent', kind: 'notice', tone: 'warn', title: 'I couldn’t verify your identity', body: 'For your security I’ve stopped trying. You can still ask general questions about grants, or I can connect you with a person who can verify you.' });
+    store.set({ suggestions: guestChips() });
+  } else {
+    say({ role: 'agent', kind: 'text', text: retryText });
+    store.set({ suggestions: isVoice() ? VOICE_SIGN_IN_SUGGESTIONS : SIGN_IN_SUGGESTIONS });
+  }
+}
 
-  // Account must be active before we discuss grants.
-  let donor;
-  try { donor = await getDonorProfile(ctx, s.donorId); } catch (e) { return allDown(ctx, e, userText); }
+async function verified(ctx: ToolCtx, id: string) {
+  const s = store.get();
+  const donor = demoDonors().find((d) => d.donor.donor_id === id)!.donor;
+  store.set({ auth: { donorId: id, attempts: 0, locked: false, guest: false } });
+  setExchange({ authentication: authNow() });
+  allow(`Session limited to grants on ${id}`);
+  const first = donor.primary_contact_name.split(' ')[0];
+  say({
+    role: 'agent', kind: 'text',
+    text: isVoice()
+      ? `Thanks, ${first}. You’re verified for the ${donor.account_name}. I can only discuss grants on this account.`
+      : `Thanks, ${first}. You’re signed in to ${donor.account_name}. I’ll only show grants on this account.`,
+  });
+
+  const pending = s.memory.pendingQuestion;
+  remember({ pendingQuestion: undefined });
+  if (pending) return handle(ctx, { type: 'text', text: pending }, pending);
+  say({ role: 'agent', kind: 'text', text: isVoice() ? 'What would you like to know about your grants?' : 'What would you like to know?' });
+  setExchange({ outcome: 'sign_in' });
+  store.set({ suggestions: DEFAULT_SUGGESTIONS });
+}
+
+// ------------------------------------------------------------------ 4. authorization + grants agent
+
+async function accountActive(ctx: ToolCtx): Promise<boolean> {
+  const donor = await getDonorProfile(ctx, store.get().auth.donorId!);
   if (donor && donor.account_status !== 'ACTIVE') {
-    const g = ctx.step('reason', 'guard', 'Account status', `${donor.account_status} → no self-service, route to Donor Services`);
-    g.finish('warn', undefined, 2);
+    block(`Account ${donor.account_status.toLowerCase()} → no self-service`);
     say({
       role: 'agent', kind: 'notice', tone: 'warn', title: `Your account is ${donor.account_status.toLowerCase()}`,
       body: 'I can’t share grant details while the account isn’t active. Our Donor Services team can help.',
     });
+    setExchange({ outcome: 'generic' });
     store.set({ suggestions: chips('Talk to a person') });
-    return remember(ctx, { lastIntent: intent });
+    return false;
+  }
+  return true;
+}
+
+async function grantFlow(ctx: ToolCtx, intent: Intent, grantRef: string | undefined) {
+  const s = store.get();
+  const donorId = s.auth.donorId!;
+  if (!(await accountActive(ctx))) return;
+
+  // A grant that isn't on this donor's account is never looked up.
+  if (grantRef && !grants.some((g) => g.grant_id === grantRef && g.donor_id === donorId)) {
+    block(`${grantRef} is not on ${donorId}’s account → not looked up`);
+    say({ role: 'agent', kind: 'text', text: `I can only share grants on your account, and I don’t see ${grantRef} there. Would you like to hear the grants you have?` });
+    setExchange({ outcome: 'generic' });
+    store.set({ suggestions: chips('Show all my grants', 'Talk to a person') });
+    return remember({ lastIntent: intent });
   }
 
-  // Resolve which grant.
   let grantId = grantRef;
   if (!grantId) {
-    let all: Grant[];
-    try { all = await listGrants(ctx, s.donorId); } catch (e) { return allDown(ctx, e, userText); }
+    const all = await listGrants(ctx, donorId);
+    allow(`Searched only ${donorId}’s grants`);
     const filter: Record<string, (g: Grant) => boolean> = {
       why_pending: (g) => g.grant_status === 'PENDING_DD',
       expedite: (g) => g.grant_status === 'PENDING_DD',
@@ -280,152 +539,113 @@ async function grantFlow(ctx: ToolCtx, intent: Intent, grantRef: string | undefi
       let prompt = `You have ${candidates.length} ${noun} grants. Which one?`;
       if (!candidates.length) { prompt = `I don’t see any ${noun} grants. Here are all of your grants.`; candidates = all; }
       say({ role: 'agent', kind: 'grant_picker', prompt, grants: candidates.map(pick) });
-      store.set({ suggestions: chips('Talk to a person') });
-      return remember(ctx, { lastIntent: intent, pendingIntent: intent });
+      store.set({ suggestions: pickChips(candidates) });
+      return remember({ lastIntent: intent, pendingIntent: intent, offered: candidates.map((g) => g.grant_id) });
     }
   }
 
-  // Fetch status (+ due diligence when in review).
-  let bundle;
-  try { bundle = await getGrantStatus(ctx, grantId); } catch (e) { return allDown(ctx, e, userText); }
+  const bundle = await getGrantStatus(ctx, grantId);
   if (!bundle.grant) {
     say({ role: 'agent', kind: 'text', text: `I couldn’t find grant ${grantId} on your account.` });
     store.set({ suggestions: chips('Show all my grants') });
-    return remember(ctx, { lastIntent: intent });
+    return remember({ lastIntent: intent });
   }
+  allow(`${grantId} belongs to ${donorId}`);
+  addSource(`Grant record ${grantId}`);
   let dd: DueDiligence | undefined;
-  let ddSource = '';
-  if (bundle.grant.grant_status === 'PENDING_DD') {
-    try {
-      const r = await checkDueDiligence(ctx, grantId, s.donorId);
-      dd = r.dd; ddSource = r.source;
-    } catch (e) { return allDown(ctx, e, userText); }
-  }
+  if (bundle.grant.grant_status === 'PENDING_DD') { dd = await checkDueDiligence(ctx, grantId); addSource(`Due diligence review ${grantId}`); }
 
-  // Guardrails.
   const sens = sensitivity(bundle.grantee, dd);
-  if (sens) {
-    const g = ctx.step('reason', 'guard', 'Compliance guardrail', `${sens} → detail withheld from self-service`);
-    g.finish('warn', undefined, 3);
-  }
-  if (dd?.escalation_flag && !PUBLIC_REASON[dd.escalation_reason] && !sens) {
-    const g = ctx.step('reason', 'guard', 'Internal flag', `“${dd.escalation_reason}” is internal-only → not shown`);
-    g.finish('ok', undefined, 1);
-  }
-  const masked = ctx.step('reason', 'guard', 'PII masking', 'review_notes masked · grantee_name served from masked view');
-  masked.finish('ok', undefined, 2);
-
-  const view: GrantStatusView = { ...buildStatusView(bundle, s.role, dd), sources: [bundle.source, ...(ddSource ? [ddSource] : [])] };
-  groundingCheck(ctx, 'every date, amount and reason traced to tool output');
-  const wantsPolicy = !view.withheld && (intent === 'why_pending' || intent === 'payment' || (view.tone === 'review' && intent === 'status'));
-  const msgId = say({ role: 'agent', kind: 'grant_status', view: { ...view, policyLoading: wantsPolicy } });
+  const view: GrantStatusView = buildStatusView(bundle, dd);
+  // "Can this be sped up?" right after hearing the status: don't repeat it, go straight to the answer.
+  const alreadyShown = intent === 'expedite' && s.memory.currentGrantId === grantId && !view.withheld;
+  const wantsPolicy = !alreadyShown && !view.withheld && (intent === 'why_pending' || intent === 'payment' || (view.tone === 'review' && intent === 'status'));
+  const msgId = alreadyShown ? '' : say({ role: 'agent', kind: 'grant_status', view: { ...view, policyLoading: wantsPolicy } });
 
   if (wantsPolicy) {
-    const reasonKw = dd?.escalation_flag ? PUBLIC_REASON[dd.escalation_reason]?.kb ?? '' : '';
-    const q = intent === 'payment' || view.tone !== 'review' ? 'payment wire paid' : `why pending due diligence review ${reasonKw}`;
-    const passages = await searchKnowledgeBase(ctx, q, { grant_id: grantId, donor_id: s.donorId });
+    const q = intent === 'payment' || view.tone !== 'review' ? 'payment wire paid' : 'why pending due diligence review';
+    const passages = await searchKnowledgeBase(ctx, q);
+    passages.forEach((p) => addSource(`${p.title} › ${p.section}`));
     patchMessage(msgId, (m) => (m.role === 'agent' && m.kind === 'grant_status' ? { ...m, view: { ...m.view, citations: passages, policyLoading: false } } : m));
   }
 
-  remember(ctx, { currentGrantId: grantId, lastIntent: intent, pendingIntent: undefined });
+  remember({ currentGrantId: grantId, lastIntent: intent, pendingIntent: undefined, offered: undefined });
 
-  // Intent-specific follow-through.
   if (view.withheld) {
-    await escalate(ctx, {
-      caseType: 'Due Diligence Question', reason: `Compliance-sensitive review (${sens}): withheld from self-service`,
-      donorWords: userText, view, quiet: true,
-    });
+    await handOff(ctx, 'Due Diligence Question', `Compliance-sensitive review (${sens})`);
     return;
   }
   if (intent === 'expedite') {
     if (view.tone === 'review') {
-      const g = ctx.step('reason', 'guard', 'Escalation rule', 'assistant can’t change review timelines → hand to a specialist');
-      g.finish('warn', undefined, 2);
-      await escalate(ctx, {
-        caseType: 'Due Diligence Question', reason: 'Asked to expedite a grant in review', donorWords: userText, view,
-        intro: 'I can’t change the review timeline. It’s a required check before any grant is paid. I’ve asked a specialist to look at it and follow up with you.',
-      });
+      say({ role: 'agent', kind: 'text', text: 'I can’t change the review timeline. It’s a required check before any grant is paid. A specialist can look at it with you.' });
+      await handOff(ctx, 'Due Diligence Question', 'Asked to expedite a grant in review');
       return;
     }
-    say({ role: 'agent', kind: 'text', text: `This grant is already past review, so there’s nothing to speed up on my side. If something looks wrong, I can connect you with a person.` });
+    say({ role: 'agent', kind: 'text', text: 'This grant is already past review, so there’s nothing to speed up. If something looks wrong, I can connect you with a person.' });
   }
-  if (intent === 'declined' && view.tone === 'declined') {
-    const g = ctx.step('reason', 'guard', 'Policy', 'decline reasons only come from a specialist');
-    g.finish('ok', undefined, 1);
-  }
-
   store.set({ suggestions: suggestionsFor(view) });
 }
 
 function suggestionsFor(v: GrantStatusView): Chip[] {
-  if (v.tone === 'review') {
-    return v.overdue
-      ? chips('Talk to a person', 'Why is it taking so long?', 'What is due diligence?', 'Show all my grants')
-      : chips('Why is it taking so long?', 'What is due diligence?', 'Can this be sped up?', 'Talk to a person');
-  }
+  if (v.tone === 'review') return chips('What is due diligence?', 'Can this be sped up?', 'Talk to a person');
   if (v.tone === 'approved') return chips('When will the charity get paid?', 'Show all my grants', 'Talk to a person');
-  if (v.tone === 'declined') return chips('Why was it declined?', 'Talk to a person', 'Show all my grants');
+  if (v.tone === 'declined') return chips('Talk to a person', 'Show all my grants');
   return chips('Show all my grants', 'Talk to a person');
 }
 
-// ------------------------------------------------------------------ escalation
+// ------------------------------------------------------------------ hand-off
 
-interface EscalateOpts {
-  caseType: string;
-  reason: string;
-  donorWords: string;
-  view?: GrantStatusView;
-  intro?: string;
-  quiet?: boolean;
-}
-
-async function escalate(ctx: ToolCtx, o: EscalateOpts) {
+async function handOff(ctx: ToolCtx, caseTypeName: string, reason: string) {
+  const voice = isVoice();
   const s = store.get();
-  const donor = demoDonors().find((d) => d.donor.donor_id === s.donorId)!.donor;
-  const grantId = o.view?.grant.grant_id ?? s.memory.currentGrantId;
-  const g = grantId ? grants.find((x) => x.grant_id === grantId) : undefined;
-  const snapshot = o.view ?? lastStatusView();
+  const donor = currentDonor();
+  const { caseId, caseType } = await createServiceRequest(ctx, caseTypeName);
+  await readQueue(ctx, caseType.escalation_team);
+  const mode = voice ? 'transfer' : 'case';
+  const handoff = { caseId, team: caseType.escalation_team, responseHours: caseType.sla_hours, mode } as const;
+  setExchange({ outcome: 'handoff', handoff });
+  say({ role: 'agent', kind: 'handoff', caseId, team: caseType.escalation_team, responseHours: caseType.sla_hours, reason, mode });
 
-  if (o.intro) say({ role: 'agent', kind: 'text', text: o.intro });
-  const { caseId, caseType } = await createServiceRequest(ctx, o.caseType, { grant_id: grantId, donor_id: donor.donor_id });
-  const { queue, slots } = await readQueue(ctx, caseType.escalation_team);
-
-  const summaryParts = [`${donor.primary_contact_name} (${donor.account_name}) said: “${o.donorWords}”.`];
-  if (g && snapshot) summaryParts.push(`Grant ${g.grant_id} for ${fmtMoney(g.grant_amount_usd)} to ${g.grantee_name} is ${snapshot.statusLabel.toLowerCase()}. ${snapshot.facts.filter((f) => f.label !== 'Submitted').map((f) => `${f.label}: ${f.value}`).join('; ')}.`);
-  summaryParts.push(`Escalated by the assistant: ${o.reason}.`);
-
-  const transcript = store.get().messages.map((m) => ({ who: m.role === 'user' ? 'Donor' : 'Assistant', text: messageToText(m) }));
+  // The case the rep sees: built only from the redacted conversation (no PII, no PIN).
+  const snapshot = lastStatusView();
+  const g = snapshot?.grant ?? (s.memory.currentGrantId ? grants.find((x) => x.grant_id === s.memory.currentGrantId) : undefined);
+  const words = s.exchange?.question ?? '';
+  const who = donor ? `${donor.primary_contact_name} (${donor.account_name})` : voice ? 'An unverified caller' : 'An unverified visitor';
+  const parts = [`${who} ${voice ? 'called the grants line' : 'used the chat'} and said: “${words}”.`];
+  if (g && snapshot) parts.push(`Grant ${g.grant_id} for ${fmtMoney(g.grant_amount_usd)} to ${g.grantee_name} is ${snapshot.statusLabel.toLowerCase()}. ${snapshot.facts.filter((f) => f.label !== 'Submitted').map((f) => `${f.label}: ${f.value}`).join('; ')}.`);
+  if (!donor) parts.push(s.auth.locked ? `Verification failed ${MAX_ATTEMPTS} times.` : s.auth.guest ? 'They chose to continue without verifying, so no account details were shared.' : 'They had not verified yet.');
+  parts.push(`Handed off by the assistant: ${reason}.${voice ? ' The call was transferred to you.' : ''}`);
+  const speaker = voice ? 'Caller' : 'Donor';
   const rec: CaseRecord = {
     id: caseId,
-    donorId: donor.donor_id,
-    donorName: donor.primary_contact_name,
-    accountName: donor.account_name,
-    grantId,
+    channel: s.channel,
+    mode,
+    donorId: donor?.donor_id ?? 'unverified',
+    donorName: donor?.primary_contact_name ?? (voice ? 'Unverified caller' : 'Unverified visitor'),
+    accountName: donor?.account_name ?? 'Not verified',
+    verified: !!donor,
+    grantId: g?.grant_id,
     caseTypeId: caseType.case_type_id,
     caseType: caseType.case_type_name,
     team: caseType.escalation_team,
     slaHours: caseType.sla_hours,
     createdAt: now(),
     createdByAgent: true,
-    reason: o.reason,
-    donorWords: o.donorWords,
-    summary: summaryParts.join(' '),
-    nextStep: nextStepFor(o.reason, snapshot),
-    transcript,
-    taskIds: [...store.get().sessionTaskIds],
+    reason,
+    donorWords: words,
+    summary: parts.join(' '),
+    nextStep: nextStepFor(reason, snapshot, !!donor, voice),
+    transcript: store.get().messages.map((m) => ({ who: m.role === 'user' ? speaker : 'Assistant', text: voice ? toSpeech(m) : messageToText(m) })),
     grantSnapshot: snapshot,
     status: 'open',
     replies: [],
     live: true,
   };
-  store.set((st) => ({ cases: [rec, ...st.cases] }));
-
-  if (o.quiet) say({ role: 'agent', kind: 'text', text: 'I’ve shared this with a specialist. You can pick a time for them to call you.' });
-  say({ role: 'agent', kind: 'escalation', caseId });
-  const avail = queue.current_availability === 'AVAILABLE' ? 'specialists available now' : queue.current_availability === 'BUSY' ? 'team is busy right now' : 'team is offline until tomorrow';
-  say({ role: 'agent', kind: 'callback', caseId, queueLine: `${queue.queue_name} · ${queue.queue_depth} in queue · ${avail}`, slots });
-  store.set({ suggestions: [] });
-  remember(ctx, { openCaseId: caseId });
+  store.set((st) => ({ cases: [rec, ...st.cases], repSelected: caseId, suggestions: [] }));
+  if (voice) {
+    store.set({ call: 'transferring' });
+    setTimeout(() => { if (store.get().call === 'transferring') store.set({ call: 'transferred' }); }, 2500);
+  }
 }
 
 function lastStatusView(): GrantStatusView | undefined {
@@ -437,25 +657,11 @@ function lastStatusView(): GrantStatusView | undefined {
   return undefined;
 }
 
-function nextStepFor(reason: string, v?: GrantStatusView) {
+function nextStepFor(reason: string, v: GrantStatusView | undefined, verified: boolean, voice: boolean) {
+  if (!verified) return voice ? 'Verify the caller’s identity before discussing any grant' : 'Verify the visitor’s identity before discussing any grant';
   if (/expedite/i.test(reason)) return 'Check the review’s progress and give the donor a realistic date';
-  if (/sources down/i.test(reason)) return 'Look up the grant directly in the grants platform and call back';
   if (/Compliance/i.test(reason)) return 'Compliance to review before any donor contact';
   if (v?.overdue) return 'Find out why the review is past its estimate';
   if (v?.tone === 'declined') return 'Review the decline notes and explain options to the donor';
-  return 'Call the donor and answer their question';
-}
-
-async function bookCallback(ctx: ToolCtx, caseId: string, slot: string, messageId: string, donorId: string) {
-  const rec = store.get().cases.find((c) => c.id === caseId);
-  patchMessage(messageId, (m) => (m.role === 'agent' && m.kind === 'callback' ? { ...m, chosen: slot } : m));
-  await scheduleFollowUp(ctx, caseId, slot, { grant_id: rec?.grantId, donor_id: donorId });
-  store.set((s) => ({
-    cases: s.cases.map((c) => (c.id === caseId
-      ? { ...c, callback: slot, taskIds: [...s.sessionTaskIds], transcript: [...c.transcript, { who: 'Donor', text: `Call me ${slot}` }] }
-      : c)),
-  }));
-  say({ role: 'agent', kind: 'callback_confirmed', caseId, slot, team: rec?.team ?? 'our team' });
-  store.set({ suggestions: chips('Show all my grants', 'Thanks!') });
-  remember(ctx, { openCaseId: caseId });
+  return voice ? 'Pick up the transferred call and answer the question' : 'Contact the donor and answer their question';
 }

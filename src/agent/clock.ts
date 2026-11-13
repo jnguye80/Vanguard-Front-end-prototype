@@ -1,4 +1,4 @@
-// The synthetic extract was loaded on 2026-09-30, so the demo clock starts that morning (9:00 AM ET)
+// The fictional sample data is dated around 2026-09-30, so the demo clock starts that morning (9:00 AM ET)
 // and then runs in real time. Every "today", ETA and SLA countdown in the app is relative to this clock.
 
 const DEMO_START = Date.parse('2026-09-30T13:00:00Z');

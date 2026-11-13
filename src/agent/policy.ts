@@ -2,8 +2,8 @@
 // tool-returned fields (grounding rule). Compliance-sensitive detail is withheld (guardrail).
 
 import type { DueDiligence, Grantee } from '../data/types';
-import { daysFromToday, fmtDate, fmtMoney, fmtTime, now } from './clock';
-import type { GrantStatusView, Role, StatusFact, StatusStep, ToolBundle } from './types';
+import { daysFromToday, fmtDate, fmtMoney } from './clock';
+import type { GrantStatusView, StatusFact, StatusStep, ToolBundle } from './types';
 
 /** escalation_reason values the donor may hear about, in plain language. Others are internal-only. */
 export const PUBLIC_REASON: Record<string, { fact: string; sentence: string; kb: string }> = {
@@ -61,12 +61,11 @@ function relative(iso: string) {
   return `${-d} days ago`;
 }
 
-export function buildStatusView(b: ToolBundle, role: Role, dd?: DueDiligence): GrantStatusView {
+export function buildStatusView(b: ToolBundle, dd?: DueDiligence): GrantStatusView {
   const g = b.grant!;
   const { label, tone } = statusLabel(g.grant_status, dd);
   const name = g.grantee_name;
-  // Advisors can't see amounts, so their sentences name the charity without one.
-  const subject = role === 'advisor' ? `The grant to ${name}` : `Your ${fmtMoney(g.grant_amount_usd)} grant to ${name}`;
+  const subject = `Your ${fmtMoney(g.grant_amount_usd)} grant to ${name}`;
   const facts: StatusFact[] = [];
   let explanation = '';
   let overdue = false;
@@ -116,11 +115,6 @@ export function buildStatusView(b: ToolBundle, role: Role, dd?: DueDiligence): G
 
   facts.unshift({ label: 'Submitted', value: fmtDate(g.submitted_date) });
 
-  const asOfTime = new Date(now().getTime() - b.ageHours * 3_600_000);
-  const asOf = b.source.startsWith('gold')
-    ? `Data as of ${fmtTime(asOfTime)} today · gold layer`
-    : `Live data from ${b.source.replace(' (live)', '')} · gold layer not used`;
-
   return {
     grant: g,
     statusLabel: label,
@@ -129,8 +123,6 @@ export function buildStatusView(b: ToolBundle, role: Role, dd?: DueDiligence): G
     facts,
     explanation,
     withheld: !!sensitive,
-    sources: [b.source, ...(dd ? ['gold.due_diligence_queue'] : [])],
-    asOf,
     overdue,
     citations: [],
     policyLoading: false,

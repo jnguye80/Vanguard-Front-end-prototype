@@ -1,3 +1,7 @@
+// The rep's side of a hand-off. Chat hand-offs arrive as cases; voice hand-offs arrive as transferred calls.
+// Either way the rep gets the AI summary, what the donor saw and the (redacted) transcript, so the donor
+// never has to repeat themselves.
+
 import { useEffect, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { fmtDateTime, fmtDuration, now } from '../agent/clock';
 import type { CaseRecord } from '../agent/types';
@@ -32,7 +36,7 @@ export function RepConsole() {
   const open = cases.filter((c) => c.status === 'open').length;
 
   return (
-    <div className="page">
+    <div className="simple">
       <section className="card queue" aria-label="Case queue">
         <div className="card-pad" style={{ display: 'flex', flexDirection: 'column', gap: 10, borderBottom: '1px solid var(--line-soft)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
@@ -63,6 +67,7 @@ export function RepConsole() {
               </span>
               <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{c.caseType} · {c.reason}</span>
               <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <ChannelPill c={c} />
                 <span className={`pill ${c.createdByAgent ? 'pill-ai' : 'pill-neutral'}`} style={{ fontSize: 11 }}>{c.live ? 'AI · this session' : c.createdByAgent ? 'AI-created' : 'Rep-created'}</span>
                 <span className={`pill ${c.status === 'resolved' ? 'pill-approved' : urgent ? 'pill-review' : 'pill-neutral'}`} style={{ fontSize: 11 }}>
                   {c.status === 'resolved' ? 'Resolved' : `SLA ${fmtDuration(left)}`}
@@ -73,21 +78,19 @@ export function RepConsole() {
           );
         })}
       </section>
-      {selected ? <CaseDetail key={selected.id} c={selected} /> : <div className="detail"><div className="card empty">No cases yet. Escalate one from the donor chat.</div></div>}
+      {selected ? <CaseDetail key={selected.id} c={selected} /> : <div className="detail"><div className="card empty">No cases yet. Hand one off from the chat or a call.</div></div>}
     </div>
   );
 }
 
 function CaseDetail({ c }: { c: CaseRecord }) {
-  const tasks = useApp((s) => s.tasks);
-  const [tab, setTab] = useState<'summary' | 'log' | 'transcript'>('summary');
+  const [tab, setTab] = useState<'summary' | 'transcript'>('summary');
   const [calling, setCalling] = useState(false);
   const [replyOpen, setReplyOpen] = useState(false);
   const [reply, setReply] = useState('');
 
   const update = (patch: Partial<CaseRecord>) => store.set((s) => ({ cases: s.cases.map((x) => (x.id === c.id ? { ...x, ...patch } : x)) }));
   const resolved = c.status === 'resolved';
-  const log = tasks.filter((t) => c.taskIds.includes(t.task_id)).slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
   const left = slaLeft(c);
 
   const draftReply = () => {
@@ -96,10 +99,10 @@ function CaseDetail({ c }: { c: CaseRecord }) {
     const line = g
       ? `I looked into your grant to ${g.grant.grantee_name} (${g.grant.grant_id}). It’s currently ${g.statusLabel.toLowerCase()}.`
       : 'I looked into your question.';
-    return `Hi ${first}, thanks for reaching out. ${line} ${c.callback ? `I’ll call you ${c.callback.toLowerCase()} as scheduled with an update.` : 'I’ll follow up with an update shortly.'}\n\nDana Brooks, ${c.team}`;
+    return `Hi ${first}, thanks for reaching out. ${line} I’ll follow up with an update shortly.\n\nDana Brooks, ${c.team}`;
   };
 
-  const TABS = ['summary', 'log', 'transcript'] as const;
+  const TABS = ['summary', 'transcript'] as const;
   // Arrow keys move between tabs (WAI-ARIA tabs pattern); Home/End jump to the ends.
   const onTabKey = (e: KeyboardEvent<HTMLDivElement>) => {
     const i = TABS.indexOf(tab);
@@ -129,15 +132,16 @@ function CaseDetail({ c }: { c: CaseRecord }) {
           <span className="small muted">{c.id} · {c.caseType} ({c.caseTypeId}) · {c.team} · opened {fmtDateTime(c.createdAt)}</span>
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>{c.donorName} · {c.accountName}</h1>
           <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            <ChannelPill c={c} />
+            <span className={`pill ${c.verified ? 'pill-paid' : 'pill-review'}`}>{c.verified ? `Verified · ${c.donorId}` : 'Not verified'}</span>
             <span className={`pill ${c.createdByAgent ? 'pill-ai' : 'pill-neutral'}`}>{c.createdByAgent ? 'Created by AI assistant' : 'Created by rep'}</span>
             <span className={`pill ${resolved ? 'pill-approved' : left < 3 * 3_600_000 ? 'pill-review' : 'pill-neutral'}`}>{resolved ? 'Resolved' : `SLA ${c.slaHours}h · ${fmtDuration(left)} left`}</span>
-            {c.callback && <span className="pill pill-approved">Callback {c.callback}</span>}
           </span>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'flex-start' }}>
           <button type="button" className={`btn ${calling ? 'btn-danger' : 'btn-primary'}`} disabled={resolved}
-            onClick={() => { setCalling(!calling); toast(calling ? `Call logged to ${c.id}` : `Calling ${c.donorName}…`); }}>
-            <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}><Icon name="phone" size={14} />{calling ? 'End call' : 'Call donor'}</span>
+            onClick={() => { setCalling(!calling); toast(calling ? `Call logged to ${c.id}` : c.mode === 'transfer' && c.live ? `Connected to ${c.donorName}` : `Calling ${c.donorName}…`); }}>
+            <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}><Icon name="phone" size={14} />{calling ? 'End call' : c.mode === 'transfer' && c.live ? 'Pick up transferred call' : 'Call donor'}</span>
           </button>
           <button type="button" className="btn" disabled={resolved} aria-expanded={replyOpen}
             onClick={() => { setReply(draftReply()); setReplyOpen(!replyOpen); }}>Reply</button>
@@ -164,7 +168,7 @@ function CaseDetail({ c }: { c: CaseRecord }) {
 
       <div className="card" style={{ overflow: 'hidden' }}>
         <div className="tabs" role="tablist" aria-label="Case sections" onKeyDown={onTabKey}>
-          {([['summary', 'Summary'], ['log', `Tool log (${log.length})`], ['transcript', `Transcript (${c.transcript.length})`]] as const).map(([k, label]) => (
+          {([['summary', 'Summary'], ['transcript', `Transcript (${c.transcript.length})`]] as const).map(([k, label]) => (
             <button key={k} id={`tab-${k}`} type="button" role="tab" className="tab" aria-selected={tab === k} aria-controls={`panel-${k}`}
               tabIndex={tab === k ? 0 : -1} onClick={() => setTab(k)}>{label}</button>
           ))}
@@ -179,44 +183,31 @@ function CaseDetail({ c }: { c: CaseRecord }) {
                   <div><dt>Why it escalated</dt><dd>{c.reason}</dd></div>
                   <div><dt>Donor’s words</dt><dd>“{c.donorWords}”</dd></div>
                   <div><dt>Suggested next step</dt><dd>{c.nextStep}</dd></div>
-                  <div><dt>Donor sentiment</dt><dd className="muted" style={{ fontWeight: 400 }}>[From command center]</dd></div>
                 </dl>
               </div>
               <div style={{ flex: '1 1 280px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <h2 className="h2">What the donor saw</h2>
-                {c.grantSnapshot ? <StatusCard view={c.grantSnapshot} compact /> : <p className="small muted" style={{ margin: 0 }}>No grant card was shown in this conversation.</p>}
+                <h2 className="h2">{c.channel === 'voice' ? 'The grant the caller heard about' : 'What the donor saw'}</h2>
+                {c.grantSnapshot ? <StatusCard view={c.grantSnapshot} compact /> : <p className="small muted" style={{ margin: 0 }}>No grant was discussed in this conversation.</p>}
               </div>
             </div>
-          )}
-          {tab === 'log' && (
-            log.length ? (
-              <div className="table-wrap" role="region" aria-label="Tool log" tabIndex={0}>
-                <table className="data">
-                  <thead><tr><th scope="col">Time</th><th scope="col">Tool</th><th scope="col">Status</th><th scope="col">Result</th><th scope="col" style={{ textAlign: 'right' }}>ms</th></tr></thead>
-                  <tbody>
-                    {log.map((t) => (
-                      <tr key={t.task_id}>
-                        <td className="mono">{t.created_at.slice(11, 19)}</td>
-                        <td className="mono">{t.task_type}</td>
-                        <td className={t.task_status === 'FAILED' ? 'status-fail' : 'status-ok'}>{t.task_status}</td>
-                        <td>{t.result_summary || t.error_message}</td>
-                        <td className="mono" style={{ textAlign: 'right' }}>{t.execution_time_ms}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : <p className="small muted" style={{ margin: 0 }}>No tool calls on this case.</p>
           )}
           {tab === 'transcript' && (
             <ol className="transcript">
               {c.transcript.map((l, i) => (
-                <li key={i} className={l.who === 'Donor' ? 'donor' : l.who.startsWith('Dana') ? 'rep' : ''}><strong>{l.who}:</strong> {l.text}</li>
+                <li key={i} className={l.who === 'Donor' || l.who === 'Caller' ? 'donor' : l.who.startsWith('Dana') ? 'rep' : ''}><strong>{l.who}:</strong> {l.text}</li>
               ))}
             </ol>
           )}
         </div>
       </div>
     </section>
+  );
+}
+
+function ChannelPill({ c }: { c: CaseRecord }) {
+  return (
+    <span className="pill pill-neutral" style={{ fontSize: 11, gap: 4 }}>
+      <Icon name={c.channel === 'voice' ? 'phone' : 'chat'} size={11} />{c.channel === 'voice' ? 'Voice · transferred call' : 'Chat · case'}
+    </span>
   );
 }

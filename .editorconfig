@@ -11,7 +11,3 @@ trim_trailing_whitespace = true
 [*.md]
 trim_trailing_whitespace = false
 
-[*.csv]
-end_of_line = unset
-insert_final_newline = unset
-trim_trailing_whitespace = false

@@ -1,6 +1,6 @@
 # Publishes the prototype to GitHub Pages. Runs only when started by hand (Actions → Deploy to GitHub Pages →
-# Run workflow), because a Pages site is public. Confirm with Vanguard Charitable before publishing their
-# synthetic extract. Enable it first under Settings → Pages → Source: GitHub Actions.
+# Run workflow), because a Pages site is public. The app contains only fictional sample data.
+# Enable it first under Settings → Pages → Source: GitHub Actions.
 name: Deploy to GitHub Pages
 
 on:

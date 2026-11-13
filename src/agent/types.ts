@@ -1,15 +1,9 @@
-import type { DonorProfile, Grant, DueDiligence, Distribution, Grantee, Task } from '../data/types';
+import type { DonorProfile, Grant, DueDiligence, Distribution, Grantee } from '../data/types';
 import type { KbPassage } from './kb';
-
-/** Demo switch for the data-source fallback chain described in section 10 of the schema doc. */
-export type Scenario = 'normal' | 'stale' | 'athena_down' | 'all_down';
-
-/** Stand-in roles until Sugu shares the real roles, personas and data-access rules. */
-export type Role = 'holder' | 'advisor' | 'family';
 
 export type Phase = 'understand' | 'reason' | 'act' | 'remember';
 
-export type TraceKind = 'auth' | 'intent' | 'tool' | 'kb' | 'guard' | 'fallback' | 'fail' | 'write' | 'memory';
+export type TraceKind = 'auth' | 'intent' | 'tool' | 'kb' | 'guard' | 'fail' | 'write' | 'memory';
 
 export interface TraceEvent {
   id: string;
@@ -18,8 +12,6 @@ export interface TraceEvent {
   kind: TraceKind;
   label: string;
   detail: string;
-  sql?: string;
-  ms?: number;
   status: 'running' | 'ok' | 'warn' | 'fail';
 }
 
@@ -35,19 +27,20 @@ export interface GrantStatusView {
   facts: StatusFact[];
   explanation: string;
   withheld: boolean;
-  sources: string[];
-  asOf: string;
-  freshnessWarning?: string;
   overdue: boolean;
   citations: KbPassage[];
   policyLoading: boolean;
 }
 
+/** A hand-off, as the rep sees it in the Rep console. Chat hand-offs open a case; voice hand-offs transfer the call. */
 export interface CaseRecord {
   id: string;
+  channel: 'chat' | 'voice';
+  mode: 'case' | 'transfer';
   donorId: string;
   donorName: string;
   accountName: string;
+  verified: boolean;
   grantId?: string;
   caseTypeId: string;
   caseType: string;
@@ -60,15 +53,32 @@ export interface CaseRecord {
   summary: string;
   nextStep: string;
   transcript: { who: string; text: string }[];
-  taskIds: string[];
   grantSnapshot?: GrantStatusView;
-  callback?: string;
   status: 'open' | 'resolved';
   replies: string[];
   live: boolean;
 }
 
-export interface CallbackSlot { id: string; label: string; sub: string }
+export type Outcome = 'answered' | 'sign_in' | 'generic' | 'handoff';
+
+/** One question and its answer: what the flow panel shows and what the Q&A contract carries. */
+export interface Exchange {
+  turn: number;
+  channel: 'chat' | 'voice';
+  /** The question after the PII guardrail (never the raw text). */
+  question: string;
+  piiRemoved: string[];
+  /** `guest`: the donor chose to continue without verifying (general questions only). */
+  authentication: { status: 'needed' | 'verified' | 'failed' | 'locked' | 'guest'; method: string; donorId?: string; detail: string };
+  /** `limited`: answered with general information only, no account data. */
+  authorization: { status: 'allowed' | 'blocked' | 'limited' | 'not_reached'; detail: string };
+  routing?: { intent: string; agent: string; toolset?: string; live: boolean };
+  tools: string[];
+  sources: string[];
+  answer: string;
+  outcome: Outcome;
+  handoff?: { caseId: string; team: string; responseHours: number; mode: 'case' | 'transfer' };
+}
 
 export type AgentMessage =
   | { id: string; role: 'user'; text: string }
@@ -77,9 +87,7 @@ export type AgentMessage =
   | { id: string; role: 'agent'; kind: 'grant_status'; view: GrantStatusView }
   | { id: string; role: 'agent'; kind: 'kb_answer'; text: string; passages: KbPassage[] }
   | { id: string; role: 'agent'; kind: 'notice'; tone: 'warn' | 'lock' | 'error'; title: string; body: string }
-  | { id: string; role: 'agent'; kind: 'escalation'; caseId: string }
-  | { id: string; role: 'agent'; kind: 'callback'; caseId: string; queueLine: string; slots: CallbackSlot[]; chosen?: string }
-  | { id: string; role: 'agent'; kind: 'callback_confirmed'; caseId: string; slot: string; team: string };
+  | { id: string; role: 'agent'; kind: 'handoff'; caseId: string; team: string; responseHours: number; reason: string; mode: 'case' | 'transfer' };
 
 export interface ToolBundle {
   donor?: DonorProfile;
@@ -87,8 +95,4 @@ export interface ToolBundle {
   dd?: DueDiligence;
   distribution?: Distribution;
   grantee?: Grantee;
-  source: string;
-  ageHours: number;
 }
-
-export type NewTask = Omit<Task, 'task_id' | 'created_at' | 'created_by_agent' | 'agent_name'>;

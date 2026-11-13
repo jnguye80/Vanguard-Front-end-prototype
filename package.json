@@ -13,7 +13,6 @@
     "check": "npm run lint && npm run typecheck && npm run build && npm test"
   },
   "dependencies": {
-    "axe-core": "^4.10.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
@@ -23,11 +22,12 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "axe-core": "^4.10.2",
     "oxlint": "^1.89.0",
     "typescript": "~7.0.2",
     "vite": "^8.3.5"
   },
-  "description": "Clickable UX prototype of Momentum, Vanguard Charitable's agentic grants assistant (ASU AI Cloud Innovation Center). Synthetic data only.",
+  "description": "Clickable UX prototype of Momentum, Vanguard Charitable's agentic grants assistant (ASU AI Cloud Innovation Center). Fictional sample data only; no real data is processed.",
   "license": "MIT",
   "engines": {
     "node": ">=20.19.0"
